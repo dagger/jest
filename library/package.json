@@ -1,0 +1,67 @@
+{
+  "name": "@otel-test-runner/jest-test",
+  "description": "Jest Test Runner with Open telemetry support for auto-instrumentation with dagger",
+  "author": "TomChv",
+  "license": "MIT",
+  "version": "0.3.1",
+  "type": "module",
+  "main": "dist/cjs/index.cjs",
+  "module": "dist/esm/index.mjs",
+  "types": "dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "require": "./dist/cjs/index.cjs",
+      "import": "./dist/esm/index.mjs"
+    },
+    "./register": {
+      "types": "./dist/types/index.d.ts",
+      "require": "./dist/cjs/index.cjs",
+      "import": "./dist/esm/index.mjs"
+    }
+  },
+  "scripts": {
+    "reset": "rm -rf node_modules && rm -rf dist",
+    "build:clean": "bun run reset && bun install && bun run build",
+    "build": "bun run build:js && bun run build:types",
+    "build:types": "bunx tsc -p tsconfig.build.json",
+    "build:js": "rollup -c",
+    "lint": "bunx biome check",
+    "lint:write": "bunx biome check --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.7",
+    "@types/bun": "latest",
+    "rollup": "^4.53.3",
+    "tslib": "^2.8.1",
+    "@rollup/plugin-commonjs": "^29.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5",
+    "@jest/globals": "^30.2.0",
+    "jest": "^30.2.0"
+  },
+  "dependencies": {
+    "@otel-test-runner/instrumentation": "0.3.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TomChv/ts-test-tracer/tree/main/packages/jest-test"
+  },
+  "keywords": [
+    "mocha",
+    "test",
+    "dagger",
+    "opentelemetry"
+  ],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bugs": {
+    "url": "https://github.com/TomChv/ts-test-tracer/issues"
+  },
+  "homepage": "https://github.com/TomChv/ts-test-tracer/tree/main#readme"
+}
