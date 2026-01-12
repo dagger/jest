@@ -1,0 +1,7 @@
+{
+  "name": "jest",
+  "engineVersion": "v0.19.9",
+  "sdk": {
+    "source": "github.com/vito/dang/dagger-sdk"
+  }
+}

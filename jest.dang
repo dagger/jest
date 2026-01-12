@@ -1,0 +1,44 @@
+type Jest {
+  """
+  The source directory for the project.
+  """
+  pub source: Directory! @defaultPath(path: "/")
+
+  """
+  The Node base image to use
+  """
+  pub nodeImage: Container! = container.from("node:25-alpine")
+
+  """
+  Execute the tests
+  """
+  pub test(files: [String!]! = []): Void @check {
+    let cmd = ["npx", "jest"] + files
+
+    base.
+    withExec(cmd).
+    sync
+
+    null
+  }
+
+  """
+  List the tests
+  """
+  pub list(): String {
+    let cmd = ["npx", "jest", "--listTests"]
+
+    base.
+    withExec(cmd).
+    stdout
+  }
+
+  let base: Container! {
+    nodeImage.
+      withMountedCache("/root/.npm", cacheVolume("node-modules")).
+      withDirectory("/src", source).
+      withWorkdir("/src").
+      withEnvVariable("CI", "true").
+      withExec(["npm", "install"])
+  }
+}
