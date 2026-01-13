@@ -1,6 +1,6 @@
 {
   "files": {
-    "includes": ["**/*.ts"]
+    "includes": ["src/**/*.ts"]
   },
   "linter": {
     "enabled": true,
