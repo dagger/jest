@@ -1,0 +1,14 @@
+{
+  "name": "hello_world",
+  "scripts": {
+    "test": "NODE_OPTIONS=\"$NODE_OPTIONS --require @dagger.io/jest/register \" jest"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "@dagger.io/jest": "../../../",
+    "jest": "^30.2.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  }
+}

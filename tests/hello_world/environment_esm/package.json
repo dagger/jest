@@ -1,0 +1,14 @@
+{
+  "name": "hello_world",
+  "scripts": {
+    "test": "NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules\" jest"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@dagger.io/jest": "../../../",
+    "jest": "^30.2.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  }
+}
