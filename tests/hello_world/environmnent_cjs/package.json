@@ -1,0 +1,14 @@
+{
+  "name": "hello_world",
+  "scripts": {
+    "test": "jest"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "@dagger.io/jest": "../../../",
+    "jest": "^30.2.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  }
+}

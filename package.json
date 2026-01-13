@@ -1,0 +1,65 @@
+{
+	"name": "@dagger.io/jest",
+	"description": "Jest Test Runner with Open telemetry support for auto-instrumentation with dagger",
+	"author": "TomChv",
+	"license": "MIT",
+	"version": "0.3.1",
+	"type": "module",
+	"exports": {
+		"./node-environment": {
+			"types": "./dist/types/node-environment.d.ts",
+			"require": "./dist/cjs/node-environment.cjs",
+			"import": "./dist/esm/node-environment.mjs"
+		},
+		"./register": {
+			"types": "./dist/types/register.d.ts",
+			"require": "./dist/cjs/register.cjs",
+			"import": "./dist/esm/register.mjs"
+		}
+	},
+	"scripts": {
+		"reset": "rm -rf node_modules && rm -rf dist",
+		"build:clean": "bun run reset && bun install && bun run build",
+		"build": "bun run build:js && bun run build:types",
+		"build:types": "bunx tsc -p tsconfig.build.json",
+		"build:js": "rollup -c",
+		"lint": "bunx biome check",
+		"lint:write": "bunx biome check --write"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.7",
+		"@rollup/plugin-commonjs": "^29.0.0",
+		"@rollup/plugin-json": "^6.1.0",
+		"@rollup/plugin-node-resolve": "^16.0.3",
+		"@rollup/plugin-typescript": "^12.3.0",
+		"@types/bun": "latest",
+		"rollup": "^4.53.3",
+		"tslib": "^2.8.1"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/dagger/jest"
+	},
+	"keywords": [
+		"jest",
+		"test",
+		"dagger",
+		"opentelemetry"
+	],
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"bugs": {
+		"url": "https://github.com/dagger/jest/issues"
+	},
+	"homepage": "https://github.com/dagger/jest",
+	"dependencies": {
+		"@opentelemetry/sdk-node": "^0.209.0",
+		"jest-environment-node": "^30.2.0",
+		"require-in-the-middle": "^8.0.1"
+	}
+}
