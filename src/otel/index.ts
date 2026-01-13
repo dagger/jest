@@ -1,3 +1,5 @@
+// TODO: rely on `@dagger.io/telemetry` instead
+
 import type { Context } from "@opentelemetry/api";
 import { propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
