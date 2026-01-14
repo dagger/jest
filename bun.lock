@@ -4,6 +4,7 @@
     "": {
       "name": "@dagger.io/jest",
       "dependencies": {
+        "@dagger.io/telemetry": "^0.0.5",
         "@opentelemetry/sdk-node": "^0.209.0",
         "jest-environment-node": "^30.2.0",
         "require-in-the-middle": "^8.0.1",
@@ -45,6 +46,8 @@
     "@biomejs/cli-win32-arm64": ["@biomejs/cli-win32-arm64@2.3.7", "", { "os": "win32", "cpu": "arm64" }, "sha512-aJAE8eCNyRpcfx2JJAtsPtISnELJ0H4xVVSwnxm13bzI8RwbXMyVtxy2r5DV1xT3WiSP+7LxORcApWw0LM8HiA=="],
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.3.7", "", { "os": "win32", "cpu": "x64" }, "sha512-pulzUshqv9Ed//MiE8MOUeeEkbkSHVDVY5Cz5wVAnH1DUqliCQG3j6s1POaITTFqFfo7AVIx2sWdKpx/GS+Nqw=="],
+
+    "@dagger.io/telemetry": ["@dagger.io/telemetry@0.0.5", "", { "dependencies": { "@opentelemetry/sdk-node": "^0.209.0" }, "peerDependencies": { "typescript": "^5" } }, "sha512-5W3ojuFghusbdNsI2HQmHjtvSasOsWhkK4Iu7ogU5Ssv+PKkLWPwCKXLipPlQ62WrQzoYXLlORTKT0/kHW6m1Q=="],
 
     "@grpc/grpc-js": ["@grpc/grpc-js@1.14.3", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-Iq8QQQ/7X3Sac15oB6p0FmUg/klxQvXLeileoqrTRGJYLV+/9tubbr9ipz0GKHjmXVsgFPo/+W+2cA8eNcR+XA=="],
 
