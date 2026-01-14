@@ -20,15 +20,7 @@ type Jest {
   pub test(files: [String!]! = []): Void @check {
     let cmd = ["npx", "jest"] + files
 
-    let module = currentModule.source
-    let build = container.from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f").
-      withMountedCache("/root/.bun/install/cache", cacheVolume("library-node-modules")).
-      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun/install/cache").
-      withDirectory("/src", module).
-      withWorkdir("/src").
-      withExec(["bun", "install"]).
-      withExec(["bun", "run", "build"]).
-      directory("/src")
+    let otelLibrary = buildLibrary
 
     let packageType = container.from("alpine:3").
       withExec(["apk", "add", "jq"]).
@@ -37,17 +29,17 @@ type Jest {
       stdout
 
     let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-    if (packageType.contains("esm")) {
-      let opts = "$NODE_OPTIONS --register @dagger.io/jest/register "
+    if (packageType.contains("commonjs")) {
+      let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
     }
 
-    let installArgs = [packageManager, "install", "/jest"]
+    let installArgs = [packageManager, "install", "-D", "/jest"]
     if (packageManager == "yarn") {
       installArgs = [packageManager, "add", "--dev", "/jest"]
     }
 
     base.
-      withMountedDirectory("/jest", build).
+      withMountedDirectory("/jest", otelLibrary).
       withExec(installArgs).
       withEnvVariable("NODE_OPTIONS", opts, expand: true).
       withExec(cmd).
@@ -78,5 +70,18 @@ type Jest {
       withWorkdir("/src").
       withEnvVariable("CI", "true").
       withExec([packageManager, "install"])
+  }
+
+  let buildLibrary: Directory! {
+    let module = currentModule.source
+
+    container.from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f").
+      withMountedCache("/root/.bun/install/cache", cacheVolume("library-node-modules")).
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun/install/cache").
+      withDirectory("/src", module).
+      withWorkdir("/src").
+      withExec(["bun", "install"]).
+      withExec(["bun", "run", "build"]).
+      directory("/src")
   }
 }
