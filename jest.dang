@@ -26,36 +26,37 @@ type Jest {
       runtime = runtime.withExec([packageManager, "run", "build"])
     }
 
+
+    let otelLibrary = buildLibrary
+
+    let packageType = container.from("alpine:3").
+      withExec(["apk", "add", "jq"]).
+      withFile("/package.json", source.file("package.json")).
+      withExec(["jq", ".type", "/package.json"]).
+      stdout
+
+    let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+    if (packageType.contains("commonjs")) {
+      let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+    }
+
+    let installArgs = [packageManager, "install", "-D", "/jest"]
+    if (packageManager == "yarn") {
+      installArgs = [packageManager, "add", "--dev", "/jest"]
+    }
+
+    if (packageManager == "pnpm") {
+      installArgs = [packageManager, "install", "-w", "-D", "/jest"]
+    }
+
     if (useEnv) {
-      let otelLibrary = buildLibrary
-
-      let packageType = container.from("alpine:3").
-        withExec(["apk", "add", "jq"]).
-        withFile("/package.json", source.file("package.json")).
-        withExec(["jq", ".type", "/package.json"]).
-        stdout
-
-      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-      if (packageType.contains("commonjs")) {
-        let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
-      }
-
-      let installArgs = [packageManager, "install", "-D", "/jest"]
-      if (packageManager == "yarn") {
-        installArgs = [packageManager, "add", "--dev", "/jest"]
-      }
-
-      if (packageManager == "pnpm") {
-        installArgs = [packageManager, "install", "-w", "-D", "/jest"]
-      }
-
-      runtime.
-        withMountedDirectory("/jest", otelLibrary).
-        withExec(installArgs).
+      runtime = runtime.
         withEnvVariable("NODE_OPTIONS", opts, expand: true)
     }
 
-    runtime
+    runtime.
+      withMountedDirectory("/jest", otelLibrary).
+      withExec(installArgs).
       withExec(cmd).
       sync
 
