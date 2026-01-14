@@ -1,9 +1,8 @@
+import { OtelSDK } from "@dagger.io/telemetry";
 import type { Circus } from "@jest/types";
 import type { Context, Span } from "@opentelemetry/api";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { TestEnvironment } from "jest-environment-node";
-
-import { otelSDK } from "./otel";
 
 const tracer = trace.getTracer("dagger.io/jest");
 
@@ -23,6 +22,8 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
 
     _originalFnByTest = new WeakMap<Circus.TestEntry, Circus.TestFn>();
 
+    _otelSDK = new OtelSDK();
+
     /////
     // TestEnvironment override
     /////
@@ -34,7 +35,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     async setup(): Promise<void> {
       await super.setup();
 
-      otelSDK.start();
+      this._otelSDK.start();
 
       // Bridge the OpenTelemetry API singleton into the Jest VM realm
       const apiKey = Symbol.for("opentelemetry.js.api.1");
@@ -137,7 +138,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
      */
     async teardown(): Promise<void> {
       try {
-        await otelSDK.shutdown();
+        await this._otelSDK.shutdown();
       } catch {
         console.warn("warning: failed to shutdown OTEL");
       } finally {
