@@ -2,7 +2,7 @@ type Jest {
   """
   The source directory for the project.
   """
-  pub source: Directory! @defaultPath(path: "/")
+  pub source: Directory! @defaultPath(path: "/") @ignorePatterns(patterns: ["**/node_modules", "/dist", "/build"])
 
   """
   The base image to use.
@@ -17,8 +17,14 @@ type Jest {
   """
   Execute the tests
   """
-  pub test(files: [String!]! = []): Void @check {
+  pub test(files: [String!]! = [], build: Boolean! = false): Void @check {
     let cmd = ["npx", "jest"] + files
+
+    let runtime = base
+
+    if (build) {
+      runtime = runtime.withExec([packageManager, "run", "build"])
+    }
 
     let otelLibrary = buildLibrary
 
@@ -42,7 +48,7 @@ type Jest {
       installArgs = [packageManager, "install", "-w", "-D", "/jest"]
     }
 
-    base.
+    runtime.
       withMountedDirectory("/jest", otelLibrary).
       withExec(installArgs).
       withEnvVariable("NODE_OPTIONS", opts, expand: true).
