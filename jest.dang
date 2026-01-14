@@ -10,6 +10,11 @@ type Jest {
   pub baseImageAddress: String! = "node:25-alpine"
 
   """
+  The package manager to use.
+  """
+  pub packageManager: String! = "npm"
+
+  """
   Execute the tests
   """
   pub test(files: [String!]! = []): Void @check {
@@ -24,12 +29,33 @@ type Jest {
       withExec(["bun", "run", "build"]).
       directory("/src")
 
+    let packageType = container.from("alpine:3").
+      withExec(["apk", "add", "jq"]).
+      withFile("/package.json", source.file("package.json").
+      withExec(["jq", "'.type'", "/package.json"]).
+      stdout
+
+    let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+    if packageType.contains("esm") {
+      let opts = "$NODE_OPTIONS --register @dagger.io/jest/register "
+    }
+
+    let install = "install"
+    if packageManager == "yarn" {
+      install = "add"
+    }
+
+    let installArgs = [install, "/jest"]
+    if packageManager == "yarn" {
+      installArgs = [install, "--dev", "/jest"]
+    }
+
     base.
-    withMountedDirectory("/jest", build).
-    withExec(["npm", "install", "/jest"]).
-    withEnvVariable("NODE_OPTIONS", "$NODE_OPTIONS --import @dagger.io/jest/register ", expand: true).
-    withExec(cmd).
-    sync
+      withMountedDirectory("/jest", build).
+      withExec(installArgs).
+      withEnvVariable("NODE_OPTIONS", opts, expand: true).
+      withExec(cmd).
+      sync
 
     null
   }
@@ -47,10 +73,14 @@ type Jest {
 
   let base: Container! {
     container.from(baseImageAddress).
-      withMountedCache("/root/.npm", cacheVolume("node-modules")).
+      withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
+      withEnvVariable("npm_config_cache", "/root/.packages").
+      withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages").
+      withEnvVariable("PNPM_HOME", "/root/.packages").
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages").
       withDirectory("/src", source).
       withWorkdir("/src").
       withEnvVariable("CI", "true").
-      withExec(["npm", "install"])
+      withExec([packageManager, "install"])
   }
 }
