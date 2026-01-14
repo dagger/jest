@@ -16,6 +16,7 @@ type Jest {
     let cmd = ["npx", "jest"] + files
 
     base.
+    withEnvVariable("NODE_OPTIONS", "$NODE_OPTIONS --register @dagger.io/jest/register ", expand: true).
     withExec(cmd).
     sync
 
