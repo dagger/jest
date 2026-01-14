@@ -31,22 +31,22 @@ type Jest {
 
     let packageType = container.from("alpine:3").
       withExec(["apk", "add", "jq"]).
-      withFile("/package.json", source.file("package.json").
+      withFile("/package.json", source.file("package.json")).
       withExec(["jq", "'.type'", "/package.json"]).
       stdout
 
     let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-    if packageType.contains("esm") {
+    if (packageType.contains("esm")) {
       let opts = "$NODE_OPTIONS --register @dagger.io/jest/register "
     }
 
     let install = "install"
-    if packageManager == "yarn" {
+    if (packageManager == "yarn") {
       install = "add"
     }
 
     let installArgs = [install, "/jest"]
-    if packageManager == "yarn" {
+    if (packageManager == "yarn") {
       installArgs = [install, "--dev", "/jest"]
     }
 
