@@ -19,7 +19,7 @@ You can either follow a no-configuration setup or update your current `jest.conf
 Add the following import in your `NODE_OPTIONS` to auto-instrument when running your test
 
 ```shell
- "NODE_OPTIONS=\"$NODE_OPTIONS --register @dagger.io/jest/register \" jest
+ "NODE_OPTIONS=\"$NODE_OPTIONS --require @dagger.io/jest/register \" jest
 ```
 
 :bulb: If your project is in ESM, make sure you first followed [ECMAScript Module setup on Jest](https://jestjs.io/docs/ecmascript-modules)

@@ -10,15 +10,40 @@ type Jest {
   pub baseImageAddress: String! = "node:25-alpine"
 
   """
+  The package manager to use.
+  """
+  pub packageManager: String! = "npm"
+
+  """
   Execute the tests
   """
   pub test(files: [String!]! = []): Void @check {
     let cmd = ["npx", "jest"] + files
 
+    let otelLibrary = buildLibrary
+
+    let packageType = container.from("alpine:3").
+      withExec(["apk", "add", "jq"]).
+      withFile("/package.json", source.file("package.json")).
+      withExec(["jq", ".type", "/package.json"]).
+      stdout
+
+    let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+    if (packageType.contains("commonjs")) {
+      let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+    }
+
+    let installArgs = [packageManager, "install", "-D", "/jest"]
+    if (packageManager == "yarn") {
+      installArgs = [packageManager, "add", "--dev", "/jest"]
+    }
+
     base.
-    withEnvVariable("NODE_OPTIONS", "$NODE_OPTIONS --import @dagger.io/jest/register ", expand: true).
-    withExec(cmd).
-    sync
+      withMountedDirectory("/jest", otelLibrary).
+      withExec(installArgs).
+      withEnvVariable("NODE_OPTIONS", opts, expand: true).
+      withExec(cmd).
+      sync
 
     null
   }
@@ -36,10 +61,27 @@ type Jest {
 
   let base: Container! {
     container.from(baseImageAddress).
-      withMountedCache("/root/.npm", cacheVolume("node-modules")).
+      withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
+      withEnvVariable("npm_config_cache", "/root/.packages").
+      withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages").
+      withEnvVariable("PNPM_HOME", "/root/.packages").
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages").
       withDirectory("/src", source).
       withWorkdir("/src").
       withEnvVariable("CI", "true").
-      withExec(["npm", "install"])
+      withExec([packageManager, "install"])
+  }
+
+  let buildLibrary: Directory! {
+    let module = currentModule.source
+
+    container.from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f").
+      withMountedCache("/root/.bun/install/cache", cacheVolume("library-node-modules")).
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun/install/cache").
+      withDirectory("/src", module).
+      withWorkdir("/src").
+      withExec(["bun", "install"]).
+      withExec(["bun", "run", "build"]).
+      directory("/src")
   }
 }
