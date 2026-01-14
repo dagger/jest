@@ -40,14 +40,14 @@ type Jest {
       let opts = "$NODE_OPTIONS --register @dagger.io/jest/register "
     }
 
-    let installArgs = ["install", "/jest"]
+    let installArgs = [packageManager, "install", "/jest"]
     if (packageManager == "yarn") {
-      installArgs = ["add", "--dev", "/jest"]
+      installArgs = [packageManager, "add", "--dev", "/jest"]
     }
 
     base.
       withMountedDirectory("/jest", build).
-      withExec([packageManager] + installArgs).
+      withExec(installArgs).
       withEnvVariable("NODE_OPTIONS", opts, expand: true).
       withExec(cmd).
       sync
