@@ -52,7 +52,7 @@ type Jest {
 
     base.
       withMountedDirectory("/jest", build).
-      withExec(installArgs).
+      withExec([packageManager] + installArgs).
       withEnvVariable("NODE_OPTIONS", opts, expand: true).
       withExec(cmd).
       sync
