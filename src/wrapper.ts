@@ -16,7 +16,10 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     // lifecycle synchronusly.
     /////
 
-    _blockSpanAndContextByBlock = new WeakMap<Circus.DescribeBlock, { span: Span; ctx: Context }>();
+    _blockSpanAndContextByBlock = new WeakMap<
+      Circus.DescribeBlock,
+      { span: Span; ctx: Context; failed: boolean }
+    >();
 
     _testSpanByTest = new WeakMap<Circus.TestEntry, Span>();
 
@@ -91,6 +94,8 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
             } else {
               span.setStatus({ code: SpanStatusCode.ERROR });
             }
+
+            this.setParentAsFailed(event.test.parent);
           } else {
             span.setStatus({ code: SpanStatusCode.OK });
           }
@@ -120,14 +125,23 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
         this._blockSpanAndContextByBlock.set(event.describeBlock, {
           span: span,
           ctx: trace.setSpan(ctx, span),
+          failed: false,
         });
       }
 
       // On block end, close the block's span
       if (event.name === "run_describe_finish") {
-        const span = this._blockSpanAndContextByBlock.get(event.describeBlock)?.span;
+        const _parent = this._blockSpanAndContextByBlock.get(
+          event.describeBlock,
+        );
 
-        if (span) {
+        if (_parent) {
+          const span = _parent.span;
+          if (_parent.failed) {
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            this.setParentAsFailed(event.describeBlock.parent);
+          }
+
           span.end();
         }
       }
@@ -187,6 +201,21 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       }
 
       return ctx;
+    }
+
+    /**
+     * Set the parent block as failed so we propagate the error.
+     */
+    setParentAsFailed(parent?: Circus.DescribeBlock) {
+      if (!parent) {
+        return;
+      }
+
+      const _parent = this._blockSpanAndContextByBlock.get(parent);
+      if (_parent) {
+        _parent.failed = true;
+        this._blockSpanAndContextByBlock.set(parent, _parent);
+      }
     }
   };
 }
