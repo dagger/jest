@@ -82,7 +82,7 @@ type Jest {
       withEnvVariable("PNPM_HOME", "/root/.packages").
       withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
 
-    if (packageManager == "pnpm" and baseImageAddress.contains("node:") {
+    if (packageManager == "pnpm" and baseImageAddress.contains("node:")) {
       base = base.withExec(["corepack", "enable"])
     }
 
