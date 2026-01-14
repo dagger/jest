@@ -17,7 +17,7 @@ type Jest {
   """
   Execute the tests
   """
-  pub test(files: [String!]! = [], build: Boolean! = false): Void @check {
+  pub test(files: [String!]! = [], build: Boolean! = false, useEnv: Boolean! = false): Void @check {
     let cmd = ["npx", "jest"] + files
 
     let runtime = base
@@ -26,32 +26,36 @@ type Jest {
       runtime = runtime.withExec([packageManager, "run", "build"])
     }
 
-    let otelLibrary = buildLibrary
+    if (useEnv) {
+      let otelLibrary = buildLibrary
 
-    let packageType = container.from("alpine:3").
-      withExec(["apk", "add", "jq"]).
-      withFile("/package.json", source.file("package.json")).
-      withExec(["jq", ".type", "/package.json"]).
-      stdout
+      let packageType = container.from("alpine:3").
+        withExec(["apk", "add", "jq"]).
+        withFile("/package.json", source.file("package.json")).
+        withExec(["jq", ".type", "/package.json"]).
+        stdout
 
-    let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-    if (packageType.contains("commonjs")) {
-      let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+      if (packageType.contains("commonjs")) {
+        let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+      }
+
+      let installArgs = [packageManager, "install", "-D", "/jest"]
+      if (packageManager == "yarn") {
+        installArgs = [packageManager, "add", "--dev", "/jest"]
+      }
+
+      if (packageManager == "pnpm") {
+        installArgs = [packageManager, "install", "-w", "-D", "/jest"]
+      }
+
+      runtime.
+        withMountedDirectory("/jest", otelLibrary).
+        withExec(installArgs).
+        withEnvVariable("NODE_OPTIONS", opts, expand: true)
     }
 
-    let installArgs = [packageManager, "install", "-D", "/jest"]
-    if (packageManager == "yarn") {
-      installArgs = [packageManager, "add", "--dev", "/jest"]
-    }
-
-    if (packageManager == "pnpm") {
-      installArgs = [packageManager, "install", "-w", "-D", "/jest"]
-    }
-
-    runtime.
-      withMountedDirectory("/jest", otelLibrary).
-      withExec(installArgs).
-      withEnvVariable("NODE_OPTIONS", opts, expand: true).
+    runtime
       withExec(cmd).
       sync
 
@@ -77,7 +81,7 @@ type Jest {
       withEnvVariable("PNPM_HOME", "/root/.packages").
       withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
 
-    if (packageManager == "pnpm") {
+    if (packageManager == "pnpm" and baseImageAddress.contains("node:") {
       base = base.withExec(["corepack", "enable"])
     }
 
