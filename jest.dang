@@ -18,27 +18,13 @@ type Jest {
   Execute the tests
   """
   pub test(files: [String!]! = [], build: Boolean! = false, useEnv: Boolean! = false): Void @check {
-    let cmd = ["npx", "jest"] + files
-
     let runtime = base
 
     if (build) {
       runtime = runtime.withExec([packageManager, "run", "build"])
     }
 
-
     let otelLibrary = buildLibrary
-
-    let packageType = container.from("alpine:3").
-      withExec(["apk", "add", "jq"]).
-      withFile("/package.json", source.file("package.json")).
-      withExec(["jq", ".type", "/package.json"]).
-      stdout
-
-    let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-    if (packageType.contains("commonjs")) {
-      let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
-    }
 
     let installArgs = [packageManager, "install", "-D", "/jest"]
     if (packageManager == "yarn") {
@@ -50,6 +36,16 @@ type Jest {
     }
 
     if (useEnv) {
+      let packageType = container.from("alpine:3").
+        withExec(["apk", "add", "jq"]).
+        withFile("/package.json", source.file("package.json")).
+        withExec(["jq", ".type", "/package.json"]).
+        stdout
+
+      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+      if (packageType.contains("commonjs")) {
+        let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+      }
       runtime = runtime.
         withEnvVariable("NODE_OPTIONS", opts, expand: true)
     }
@@ -57,7 +53,7 @@ type Jest {
     runtime.
       withMountedDirectory("/jest", otelLibrary).
       withExec(installArgs).
-      withExec(cmd).
+      withExec(["npx", "jest"] + files).
       sync
 
     null
