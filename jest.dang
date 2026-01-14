@@ -15,7 +15,18 @@ type Jest {
   pub test(files: [String!]! = []): Void @check {
     let cmd = ["npx", "jest"] + files
 
+    let module = currentModule.source
+    let build = container.from(baseImageAddress).
+      withMountedCache("/root/.npm", cacheVolume("node-modules")).
+      withDirectory("/src", module).
+      withWorkdir("/src").
+      withExec(["npm", "install"]).
+      withExec(["npm", "run", "build"]).
+      directory("/src")
+
     base.
+    withMountedDirectory("/jest", build).
+    withExec(["npm", "install", "/jest"]).
     withEnvVariable("NODE_OPTIONS", "$NODE_OPTIONS --import @dagger.io/jest/register ", expand: true).
     withExec(cmd).
     sync
