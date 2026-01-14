@@ -16,12 +16,12 @@ type Jest {
     let cmd = ["npx", "jest"] + files
 
     let module = currentModule.source
-    let build = container.from(baseImageAddress).
-      withMountedCache("/root/.npm", cacheVolume("node-modules")).
+    let build = container.from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f").
+      withMountedCache("/root/.npm", cacheVolume("library-node-modules")).
       withDirectory("/src", module).
       withWorkdir("/src").
-      withExec(["npm", "install"]).
-      withExec(["npm", "run", "build"]).
+      withExec(["bun", "install"]).
+      withExec(["bun", "run", "build"]).
       directory("/src")
 
     base.
