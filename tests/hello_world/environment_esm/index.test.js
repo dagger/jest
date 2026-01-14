@@ -28,6 +28,10 @@ describe("describe", () => {
     test("describe.describe.test", () => {
       expect(1 + 1).toBe(2);
     });
+    
+    test("describe.describe.fail", () => {
+      expect(1).toBe(2);
+    });
   });
 });
 
@@ -35,7 +39,10 @@ test.each([2, 3])("test.%s", async (value) => {
   trace
     .getTracer("test")
     .startActiveSpan("hello inside test: " + value, (span) => {
-      expect(value).toBe(2);
-      span.end();
+      try {
+        expect(value).toBe(2);
+      } finally {
+        span.end();
+      }
     });
 });
