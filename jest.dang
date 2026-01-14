@@ -40,14 +40,9 @@ type Jest {
       let opts = "$NODE_OPTIONS --register @dagger.io/jest/register "
     }
 
-    let install = "install"
+    let installArgs = ["install", "/jest"]
     if (packageManager == "yarn") {
-      install = "add"
-    }
-
-    let installArgs = [install, "/jest"]
-    if (packageManager == "yarn") {
-      installArgs = [install, "--dev", "/jest"]
+      installArgs = ["add", "--dev", "/jest"]
     }
 
     base.
