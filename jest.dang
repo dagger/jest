@@ -32,7 +32,7 @@ type Jest {
     let packageType = container.from("alpine:3").
       withExec(["apk", "add", "jq"]).
       withFile("/package.json", source.file("package.json")).
-      withExec(["jq", "'.type'", "/package.json"]).
+      withExec(["jq", ".type", "/package.json"]).
       stdout
 
     let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
