@@ -38,6 +38,10 @@ type Jest {
       installArgs = [packageManager, "add", "--dev", "/jest"]
     }
 
+    if (packageManager == "pnpm") {
+      installArgs = [packageManager, "install", "-w", "-D", "/jest"]
+    }
+
     base.
       withMountedDirectory("/jest", otelLibrary).
       withExec(installArgs).
