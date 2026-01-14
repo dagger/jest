@@ -22,7 +22,8 @@ type Jest {
 
     let module = currentModule.source
     let build = container.from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f").
-      withMountedCache("/root/.npm", cacheVolume("library-node-modules")).
+      withMountedCache("/root/.bun/install/cache", cacheVolume("library-node-modules")).
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun/install/cache").
       withDirectory("/src", module).
       withWorkdir("/src").
       withExec(["bun", "install"]).
