@@ -60,12 +60,18 @@ type Jest {
   }
 
   let base: Container! {
-    container.from(baseImageAddress).
+    let base = container.from(baseImageAddress).
       withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
       withEnvVariable("npm_config_cache", "/root/.packages").
       withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages").
       withEnvVariable("PNPM_HOME", "/root/.packages").
-      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages").
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
+
+    if (packageManager == "pnpm") {
+      base = base.withExec(["corepack", "enable"])
+    }
+
+    base.
       withDirectory("/src", source).
       withWorkdir("/src").
       withEnvVariable("CI", "true").
