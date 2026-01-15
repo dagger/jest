@@ -26,13 +26,13 @@ type Jest {
 
     let otelLibrary = buildLibrary
 
-    let installArgs = [packageManager, "install", "-D", "/jest"]
+    let installLibrary = [packageManager, "install", "-D", "/jest"]
     if (packageManager == "yarn") {
-      installArgs = [packageManager, "add", "--dev", "/jest"]
+      installLibrary = [packageManager, "add", "--dev", "/jest"]
     }
 
     if (packageManager == "pnpm") {
-      installArgs = [packageManager, "install", "-w", "-D", "/jest"]
+      installLibrary = [packageManager, "install", "-w", "-D", "/jest"]
     }
 
     if (useEnv) {
@@ -52,7 +52,7 @@ type Jest {
 
     runtime.
       withMountedDirectory("/jest", otelLibrary).
-      withExec(installArgs).
+      withExec(installLibrary).
       withExec(["npx", "jest"] + files).
       sync
 
