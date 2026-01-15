@@ -1,3 +1,6 @@
+"""
+Toolchain to execute Jest tests
+"""
 type Jest {
   """
   The source directory for the project.
@@ -17,25 +20,45 @@ type Jest {
   """
   Execute the tests
   """
-  pub test(files: [String!]! = [], build: Boolean! = false, useEnv: Boolean! = false): Void @check {
+  pub test(
+  """
+  List of files to test
+  """
+  files: [String!]! = [],
+  """
+  Run build before test
+  """
+  build: Boolean! = false,
+  """
+  Use jest-defined environment
+  """
+  useEnv: Boolean! = false
+  """
+  Flags to pass to jest
+  """
+  flags: [String!]! = []
+  ): Void @check {
     let runtime = base
 
+    # optionally build first
     if (build) {
       runtime = runtime.withExec([packageManager, "run", "build"])
     }
 
-    let otelLibrary = buildLibrary
-
+    # install the local build of the otel library
     let installLibrary = [packageManager, "install", "-D", "/jest"]
+    # yarn uses add instead of install
     if (packageManager == "yarn") {
       installLibrary = [packageManager, "add", "--dev", "/jest"]
     }
 
+    # pnpm needs -w
     if (packageManager == "pnpm") {
       installLibrary = [packageManager, "install", "-w", "-D", "/jest"]
     }
 
-    if (useEnv) {
+    # optionally use your own test environment instead of the automatic one
+    if (!useEnv) {
       let packageType = container.from("alpine:3").
         withExec(["apk", "add", "jq"]).
         withFile("/package.json", source.file("package.json")).
@@ -50,10 +73,11 @@ type Jest {
         withEnvVariable("NODE_OPTIONS", opts, expand: true)
     }
 
+    # mount and install the otel library and then execute the tests
     runtime.
-      withMountedDirectory("/jest", otelLibrary).
+      withMountedDirectory("/jest", buildLibrary).
       withExec(installLibrary).
-      withExec(["npx", "jest"] + files).
+      withExec(["npx", "jest"] + flags + files).
       sync
 
     null
@@ -70,7 +94,11 @@ type Jest {
     stdout
   }
 
+  """
+  Runtime container for executing tests
+  """
   let base: Container! {
+    # set cache variables for all supported package managers
     let base = container.from(baseImageAddress).
       withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
       withEnvVariable("npm_config_cache", "/root/.packages").
@@ -89,6 +117,9 @@ type Jest {
       withExec([packageManager, "install"])
   }
 
+  """
+  Build the otel library
+  """
   let buildLibrary: Directory! {
     let module = currentModule.source
 
