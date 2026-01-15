@@ -57,7 +57,7 @@ type Jest {
       installLibrary = [packageManager, "install", "-w", "-D", "/jest"]
     }
 
-    # optionally use your own test environment instead of the automatic one
+    # skip this to use your own test environment instead of the automatic one
     if (!useEnv) {
       let packageType = container.from("alpine:3").
         withExec(["apk", "add", "jq"]).
