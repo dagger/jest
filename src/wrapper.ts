@@ -143,6 +143,8 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
           }
 
           span.end();
+
+          this._blockSpanAndContextByBlock.delete(event.describeBlock);
         }
       }
     }
