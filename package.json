@@ -3,7 +3,7 @@
 	"description": "Jest Test Runner with Open telemetry support for auto-instrumentation with dagger",
 	"author": "dagger",
 	"license": "Apache-2.0",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"type": "module",
 	"exports": {
 		"./node-environment": {
