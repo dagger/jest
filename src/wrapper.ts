@@ -3,6 +3,10 @@ import type { Circus } from "@jest/types";
 import type { Context, Span } from "@opentelemetry/api";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { TestEnvironment } from "jest-environment-node";
+import type {
+  EnvironmentContext,
+  JestEnvironmentConfig,
+} from "@jest/environment";
 
 const tracer = trace.getTracer("dagger.io/jest");
 
@@ -15,6 +19,15 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     // Some private fields to store span and context so we can handle their
     // lifecycle synchronusly.
     /////
+
+    __testfile: string;
+
+    /**
+     * Top level context span created from the test filename.
+     */
+    __topLevelSpan?: Span;
+    __topLevelContext?: Context;
+    __topLevelStatus: "success" | "failure" = "success";
 
     _blockSpanAndContextByBlock = new WeakMap<
       Circus.DescribeBlock,
@@ -31,6 +44,18 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     // TestEnvironment override
     /////
 
+    constructor(config: JestEnvironmentConfig, context: EnvironmentContext) {
+      super(config, context);
+
+      /**
+       * Save the test file to produce a root span for these tests named
+       * after that file.
+       */
+      this.__testfile = context.testPath.substring(
+        config.globalConfig.rootDir.length + 1,
+      );
+    }
+
     /**
      * Start the otel SDK during the setup and
      * propagate symbol for correct context propagation.
@@ -43,6 +68,17 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       // Bridge the OpenTelemetry API singleton into the Jest VM realm
       const apiKey = Symbol.for("opentelemetry.js.api.1");
       (this.global as any)[apiKey] = (globalThis as any)[apiKey];
+
+      // Create a testspan and root context based on the test filename.
+      this.__topLevelSpan = tracer.startSpan(
+        this.__testfile,
+        {},
+        context.active(),
+      );
+      this.__topLevelContext = trace.setSpan(
+        context.active(),
+        this.__topLevelSpan,
+      );
     }
 
     /**
@@ -154,6 +190,13 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
      */
     async teardown(): Promise<void> {
       try {
+        // Set the status to ERROR if any of the test or test suite failed
+        // and close the top level root span.
+        if (this.__topLevelStatus === "failure") {
+          this.__topLevelSpan?.setStatus({ code: SpanStatusCode.ERROR });
+        }
+        this.__topLevelSpan?.end();
+
         await this._otelSDK.shutdown();
       } catch {
         console.warn("warning: failed to shutdown OTEL");
@@ -194,12 +237,12 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       // If no parent is detected, create a new context by calling context.active() that will
       // automatically add `TRACEPARENT` so it's correctly displayed on dagger cloud.
       if (!parent) {
-        return context.active();
+        return this.__topLevelContext || context.active();
       }
 
       const ctx = this._blockSpanAndContextByBlock.get(parent)?.ctx;
       if (!ctx) {
-        return context.active();
+        return this.__topLevelContext || context.active();
       }
 
       return ctx;
@@ -209,6 +252,8 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
      * Set the parent block as failed so we propagate the error.
      */
     setParentAsFailed(parent?: Circus.DescribeBlock) {
+      this.__topLevelStatus = "failure";
+
       if (!parent) {
         return;
       }
