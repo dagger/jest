@@ -1,8 +1,11 @@
+"""
+Toolchain to execute Jest tests
+"""
 type Jest {
   """
   The source directory for the project.
   """
-  pub source: Directory! @defaultPath(path: "/")
+  pub source: Directory! @defaultPath(path: "/") @ignorePatterns(patterns: ["**/node_modules", "/dist", "/build"])
 
   """
   The base image to use.
@@ -17,36 +20,64 @@ type Jest {
   """
   Execute the tests
   """
-  pub test(files: [String!]! = []): Void @check {
-    let cmd = ["npx", "jest"] + files
+  pub test(
+  """
+  List of files to test
+  """
+  files: [String!]! = [],
+  """
+  Run build before test
+  """
+  build: Boolean! = false,
+  """
+  Use jest-defined environment
+  """
+  useEnv: Boolean! = false
+  """
+  Flags to pass to jest
+  """
+  flags: [String!]! = []
+  ): Void @check {
+    let runtime = base
 
-    let otelLibrary = buildLibrary
-
-    let packageType = container.from("alpine:3").
-      withExec(["apk", "add", "jq"]).
-      withFile("/package.json", source.file("package.json")).
-      withExec(["jq", ".type", "/package.json"]).
-      stdout
-
-    let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-    if (packageType.contains("commonjs")) {
-      let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+    # optionally build first
+    if (build) {
+      runtime = runtime.withExec([packageManager, "run", "build"])
     }
 
-    let installArgs = [packageManager, "install", "-D", "/jest"]
+    # install the local build of the otel library
+    let installLibrary = [packageManager, "install", "-D", "/jest"]
+    # yarn uses add instead of install
     if (packageManager == "yarn") {
-      installArgs = [packageManager, "add", "--dev", "/jest"]
+      installLibrary = [packageManager, "add", "--dev", "/jest"]
     }
 
+    # pnpm needs -w
     if (packageManager == "pnpm") {
-      installArgs = [packageManager, "install", "-w", "-D", "/jest"]
+      installLibrary = [packageManager, "install", "-w", "-D", "/jest"]
     }
 
-    base.
-      withMountedDirectory("/jest", otelLibrary).
-      withExec(installArgs).
-      withEnvVariable("NODE_OPTIONS", opts, expand: true).
-      withExec(cmd).
+    # use the automatic environment instead of a custom jest environment
+    if (!useEnv) {
+      let packageType = container.from("alpine:3").
+        withExec(["apk", "add", "jq"]).
+        withFile("/package.json", source.file("package.json")).
+        withExec(["jq", ".type", "/package.json"]).
+        stdout
+
+      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+      if (packageType.contains("commonjs")) {
+        let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+      }
+      runtime = runtime.
+        withEnvVariable("NODE_OPTIONS", opts, expand: true)
+    }
+
+    # mount and install the otel library and then execute the tests
+    runtime.
+      withMountedDirectory("/jest", buildLibrary).
+      withExec(installLibrary).
+      withExec(["npx", "jest"] + flags + files).
       sync
 
     null
@@ -63,7 +94,11 @@ type Jest {
     stdout
   }
 
+  """
+  Runtime container for executing tests
+  """
   let base: Container! {
+    # set cache variables for all supported package managers
     let base = container.from(baseImageAddress).
       withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
       withEnvVariable("npm_config_cache", "/root/.packages").
@@ -71,7 +106,7 @@ type Jest {
       withEnvVariable("PNPM_HOME", "/root/.packages").
       withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
 
-    if (packageManager == "pnpm") {
+    if (packageManager == "pnpm" and baseImageAddress.contains("node:")) {
       base = base.withExec(["corepack", "enable"])
     }
 
@@ -82,6 +117,9 @@ type Jest {
       withExec([packageManager, "install"])
   }
 
+  """
+  Build the otel library
+  """
   let buildLibrary: Directory! {
     let module = currentModule.source
 
