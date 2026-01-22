@@ -56,6 +56,11 @@ type Jest {
     if (packageManager == "pnpm") {
       installLibrary = [packageManager, "install", "-w", "-D", "/jest"]
     }
+    
+    # Install jest library
+    runtime = runtime.
+      withMountedDirectory("/jest", buildLibrary).
+      withExec(installLibrary)
 
     # use the automatic environment instead of a custom jest environment
     if (!useEnv) {
@@ -75,8 +80,6 @@ type Jest {
 
     # mount and install the otel library and then execute the tests
     runtime.
-      withMountedDirectory("/jest", buildLibrary).
-      withExec(installLibrary).
       withExec(["npx", "jest"] + flags + files).
       sync
 
