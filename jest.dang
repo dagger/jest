@@ -38,7 +38,8 @@ type Jest {
   """
   flags: [String!]! = []
   ): Void @check {
-    let runtime = base
+    let n = node(source, baseImageAddress, packageManager)
+    let runtime = n.base
 
     # optionally build first
     if (build) {
@@ -46,21 +47,7 @@ type Jest {
     }
 
     # install the local build of the otel library
-    let installLibrary = [packageManager, "install", "-D", "/jest"]
-    # yarn uses add instead of install
-    if (packageManager == "yarn") {
-      installLibrary = [packageManager, "add", "--dev", "/jest"]
-    }
-
-    # pnpm needs -w
-    if (packageManager == "pnpm") {
-      installLibrary = [packageManager, "install", "-w", "-D", "/jest"]
-    }
-    
-    # Install jest library
-    runtime = runtime.
-      withMountedDirectory("/jest", buildLibrary).
-      withExec(installLibrary)
+    runtime = n.withInstallLocalPackage(runtime, buildLibrary)
 
     # use the automatic environment instead of a custom jest environment
     if (!useEnv) {
@@ -92,32 +79,9 @@ type Jest {
   pub list(): String {
     let cmd = ["npx", "jest", "--listTests"]
 
-    base.
+    node(source, baseImageAddress, packageManager).base.
     withExec(cmd).
     stdout
-  }
-
-  """
-  Runtime container for executing tests
-  """
-  let base: Container! {
-    # set cache variables for all supported package managers
-    let base = container.from(baseImageAddress).
-      withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
-      withEnvVariable("npm_config_cache", "/root/.packages").
-      withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages").
-      withEnvVariable("PNPM_HOME", "/root/.packages").
-      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
-
-    if (packageManager == "pnpm" and baseImageAddress.contains("node:")) {
-      base = base.withExec(["corepack", "enable"])
-    }
-
-    base.
-      withDirectory("/src", source).
-      withWorkdir("/src").
-      withEnvVariable("CI", "true").
-      withExec([packageManager, "install"])
   }
 
   """
