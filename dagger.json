@@ -1,7 +1,14 @@
 {
   "name": "jest",
-  "engineVersion": "v0.19.9",
+  "engineVersion": "v0.19.10",
   "sdk": {
     "source": "github.com/vito/dang/dagger-sdk"
-  }
+  },
+  "dependencies": [
+    {
+      "name": "node",
+      "source": "github.com/kpenfound/dag/node@main",
+      "pin": "699c6d4f6eb1b62c51d86acb68381c8af75a2536"
+    }
+  ]
 }
