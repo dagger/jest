@@ -1,8 +1,8 @@
 {
   "name": "jest",
-  "engineVersion": "v0.19.10",
+  "engineVersion": "v0.19.11",
   "sdk": {
-    "source": "github.com/vito/dang/dagger-sdk"
+    "source": "github.com/vito/dang/dagger-sdk@0e40af118182aada20400aaef971cd252b2b9e13"
   },
   "dependencies": [
     {
