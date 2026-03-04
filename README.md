@@ -66,7 +66,7 @@ The toolchain can be customized in your `dagger.json` to meet your needs:
 
 ## Jest OpenTelemetry auto instrumentation
 
-Automatically instrument Jest tests for open telemetry.
+Automatically instrument Jest tests for Open Telemetry.
 
 The toolchain does this automatically, however you can use the library without the toolchain as described below.
 
