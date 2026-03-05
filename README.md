@@ -94,7 +94,7 @@ Add the following import in your `NODE_OPTIONS` to auto-instrument when running 
 
 #### Jest config setup
 
-:warning: This setup may not work if you already have custom environment, if so please follow the
+:warning: This setup may not work if you already have custom environment. If so please follow the
 no configuration setup that can take any environment.
 
 The library export an environment that you can use to automatically instrument your tests:
