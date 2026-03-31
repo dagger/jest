@@ -21,22 +21,22 @@ type Jest {
   Execute the tests
   """
   pub test(
-  """
-  List of files to test
-  """
-  files: [String!]! = [],
-  """
-  Run build before test
-  """
-  build: Boolean! = false,
-  """
-  Use jest-defined environment
-  """
-  useEnv: Boolean! = false
-  """
-  Flags to pass to jest
-  """
-  flags: [String!]! = []
+    """
+    List of files to test
+    """
+    files: [String!]! = [],
+    """
+    Run build before test
+    """
+    build: Boolean! = false,
+    """
+    Use jest-defined environment
+    """
+    useEnv: Boolean! = false,
+    """
+    Flags to pass to jest
+    """
+    flags: [String!]! = [],
   ): Void @check {
     let n = node(source, baseImageAddress, packageManager)
     let runtime = n.base
@@ -51,24 +51,25 @@ type Jest {
 
     # use the automatic environment instead of a custom jest environment
     if (!useEnv) {
-      let packageType = container.from("alpine:3").
-        withExec(["apk", "add", "jq"]).
-        withFile("/package.json", source.file("package.json")).
-        withExec(["jq", ".type", "/package.json"]).
-        stdout
+      let packageType = container
+        .from("alpine:3")
+        .withExec(["apk", "add", "jq"])
+        .withFile("/package.json", source.file("package.json"))
+        .withExec(["jq", ".type", "/package.json"])
+        .stdout
 
       let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
       if (packageType.contains("commonjs")) {
-        let opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+        opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
       }
-      runtime = runtime.
-        withEnvVariable("NODE_OPTIONS", opts, expand: true)
+      runtime = runtime
+        .withEnvVariable("NODE_OPTIONS", opts, expand: true)
     }
 
     # mount and install the otel library and then execute the tests
-    runtime.
-      withExec(["npx", "jest"] + flags + files).
-      sync
+    runtime
+      .withExec(["npx", "jest"] + flags + files)
+      .sync
 
     null
   }
@@ -76,12 +77,13 @@ type Jest {
   """
   List the tests
   """
-  pub list(): String {
+  pub list: String {
     let cmd = ["npx", "jest", "--listTests"]
 
-    node(source, baseImageAddress, packageManager).base.
-    withExec(cmd).
-    stdout
+    node(source, baseImageAddress, packageManager)
+      .base
+      .withExec(cmd)
+      .stdout
   }
 
   """
@@ -90,13 +92,14 @@ type Jest {
   let buildLibrary: Directory! {
     let module = currentModule.source
 
-    container.from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f").
-      withMountedCache("/root/.bun/install/cache", cacheVolume("library-node-modules")).
-      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun/install/cache").
-      withDirectory("/src", module).
-      withWorkdir("/src").
-      withExec(["bun", "install"]).
-      withExec(["bun", "run", "build"]).
-      directory("/src")
+    container
+      .from("oven/bun:1.3.0-alpine@sha256:37e6b1cbe053939bccf6ae4507977ed957eaa6e7f275670b72ad6348e0d2c11f")
+      .withMountedCache("/root/.bun/install/cache", cacheVolume("library-node-modules"))
+      .withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun/install/cache")
+      .withDirectory("/src", module)
+      .withWorkdir("/src")
+      .withExec(["bun", "install"])
+      .withExec(["bun", "run", "build"])
+      .directory("/src")
   }
 }
