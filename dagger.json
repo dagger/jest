@@ -8,7 +8,7 @@
     {
       "name": "node",
       "source": "github.com/kpenfound/dag/node@main",
-      "pin": "305dba458cd99b7df50de7f75539eefc07a720a3"
+      "pin": "9e6dad0e1e3a30afa82dd7e5663b5aa421cf25e7"
     }
   ]
 }
