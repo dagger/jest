@@ -3,9 +3,9 @@ Toolchain to execute Jest tests
 """
 type Jest {
   """
-  The workspace source
+  The source directory for the project.
   """
-  pub source: Directory!
+  pub source: Directory! @defaultPath(path: "/") @ignorePatterns(patterns: ["**/node_modules", "/dist", "/build"])
 
   """
   The base image to use.
@@ -16,11 +16,6 @@ type Jest {
   The package manager to use.
   """
   pub packageManager: String! = "npm"
-
-  new(source: Workspace!) {
-    self.source = source.directory("/", exclude: ["**/node_modules", "/dist", "/build"])
-    self
-  }
 
   """
   Execute the tests
