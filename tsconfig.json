@@ -5,7 +5,7 @@
 		"declaration": true,
 		"declarationMap": true,
 		"strict": true,
-		"moduleResolution": "node",
+		"moduleResolution": "bundler",
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"rootDir": "src",
