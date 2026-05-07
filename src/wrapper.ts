@@ -1,16 +1,25 @@
 import { OtelSDK } from "@dagger.io/telemetry";
+import type { EnvironmentContext, JestEnvironmentConfig } from "@jest/environment";
 import type { Circus } from "@jest/types";
-import type { Context, Span } from "@opentelemetry/api";
+import type { Attributes, Context, Span } from "@opentelemetry/api";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
+import {
+  ATTR_TEST_CASE_NAME,
+  ATTR_TEST_CASE_RESULT_STATUS,
+  ATTR_TEST_SUITE_NAME,
+  ATTR_TEST_SUITE_RUN_STATUS,
+  TEST_CASE_RESULT_STATUS_VALUE_FAIL,
+  TEST_CASE_RESULT_STATUS_VALUE_PASS,
+  TEST_SUITE_RUN_STATUS_VALUE_FAILURE,
+  TEST_SUITE_RUN_STATUS_VALUE_IN_PROGRESS,
+  TEST_SUITE_RUN_STATUS_VALUE_SUCCESS,
+} from "@opentelemetry/semantic-conventions/incubating";
 import type { TestEnvironment } from "jest-environment-node";
-import type {
-  EnvironmentContext,
-  JestEnvironmentConfig,
-} from "@jest/environment";
 
 const tracer = trace.getTracer("dagger.io/jest");
 
 const JEST_ROOT_BLOCK_NAME = "ROOT_DESCRIBE_BLOCK";
+const ATTR_UI_BOUNDARY = "dagger.io/ui.boundary";
 
 // A function that take any jest environment and add otel instrumentation on existing tests.
 export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
@@ -51,9 +60,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
        * Save the test file to produce a root span for these tests named
        * after that file.
        */
-      this.__testfile = context.testPath.substring(
-        config.globalConfig.rootDir.length + 1,
-      );
+      this.__testfile = context.testPath.substring(config.globalConfig.rootDir.length + 1);
     }
 
     /**
@@ -72,13 +79,16 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       // Create a testspan and root context based on the test filename.
       this.__topLevelSpan = tracer.startSpan(
         this.__testfile,
-        {},
+        {
+          attributes: {
+            [ATTR_UI_BOUNDARY]: true,
+            [ATTR_TEST_SUITE_NAME]: this.__testfile,
+            [ATTR_TEST_SUITE_RUN_STATUS]: TEST_SUITE_RUN_STATUS_VALUE_IN_PROGRESS,
+          },
+        },
         context.active(),
       );
-      this.__topLevelContext = trace.setSpan(
-        context.active(),
-        this.__topLevelSpan,
-      );
+      this.__topLevelContext = trace.setSpan(context.active(), this.__topLevelSpan);
     }
 
     /**
@@ -91,7 +101,11 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       if (event.name === "test_start") {
         const ctx = this.getOrCreateContext(event.test.parent);
 
-        const testSpan = tracer.startSpan(event.test.name, {}, ctx);
+        const testSpan = tracer.startSpan(
+          event.test.name,
+          { attributes: this.testSpanAttributes(event.test) },
+          ctx,
+        );
         this._testSpanByTest.set(event.test, testSpan);
 
         // Wrap the test function so any spans created in the test body are children
@@ -120,6 +134,8 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
         if (span) {
           const hasErrors = event.test?.errors && event.test.errors.length > 0;
           if (hasErrors) {
+            span.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, TEST_CASE_RESULT_STATUS_VALUE_FAIL);
+
             const err = this.firstJestError(event.test.errors);
             if (err) {
               span.recordException(err);
@@ -133,6 +149,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
 
             this.setParentAsFailed(event.test.parent);
           } else {
+            span.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, TEST_CASE_RESULT_STATUS_VALUE_PASS);
             span.setStatus({ code: SpanStatusCode.OK });
           }
 
@@ -156,7 +173,11 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
         event.describeBlock.name !== JEST_ROOT_BLOCK_NAME
       ) {
         const ctx = this.getOrCreateContext(event.describeBlock.parent);
-        const span = tracer.startSpan(event.describeBlock.name, {}, ctx);
+        const span = tracer.startSpan(
+          event.describeBlock.name,
+          { attributes: this.testSuiteSpanAttributes(event.describeBlock) },
+          ctx,
+        );
 
         this._blockSpanAndContextByBlock.set(event.describeBlock, {
           span: span,
@@ -167,15 +188,22 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
 
       // On block end, close the block's span
       if (event.name === "run_describe_finish") {
-        const _parent = this._blockSpanAndContextByBlock.get(
-          event.describeBlock,
-        );
+        const _parent = this._blockSpanAndContextByBlock.get(event.describeBlock);
 
         if (_parent) {
           const span = _parent.span;
+          span.setAttribute(
+            ATTR_TEST_SUITE_RUN_STATUS,
+            _parent.failed
+              ? TEST_SUITE_RUN_STATUS_VALUE_FAILURE
+              : TEST_SUITE_RUN_STATUS_VALUE_SUCCESS,
+          );
+
           if (_parent.failed) {
             span.setStatus({ code: SpanStatusCode.ERROR });
             this.setParentAsFailed(event.describeBlock.parent);
+          } else {
+            span.setStatus({ code: SpanStatusCode.OK });
           }
 
           span.end();
@@ -192,8 +220,17 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       try {
         // Set the status to ERROR if any of the test or test suite failed
         // and close the top level root span.
+        this.__topLevelSpan?.setAttribute(
+          ATTR_TEST_SUITE_RUN_STATUS,
+          this.__topLevelStatus === "failure"
+            ? TEST_SUITE_RUN_STATUS_VALUE_FAILURE
+            : TEST_SUITE_RUN_STATUS_VALUE_SUCCESS,
+        );
+
         if (this.__topLevelStatus === "failure") {
           this.__topLevelSpan?.setStatus({ code: SpanStatusCode.ERROR });
+        } else {
+          this.__topLevelSpan?.setStatus({ code: SpanStatusCode.OK });
         }
         this.__topLevelSpan?.end();
 
@@ -208,6 +245,58 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     //////
     // Utility functions
     //////
+
+    /**
+     * Return the attributes for a Jest test case span.
+     */
+    testSpanAttributes(test: Circus.TestEntry): Attributes {
+      return {
+        [ATTR_UI_BOUNDARY]: true,
+        [ATTR_TEST_CASE_NAME]: this.testCaseName(test),
+        [ATTR_TEST_SUITE_NAME]: this.testSuiteName(test.parent),
+      };
+    }
+
+    /**
+     * Return the attributes for a Jest describe block span.
+     */
+    testSuiteSpanAttributes(block: Circus.DescribeBlock): Attributes {
+      return {
+        [ATTR_UI_BOUNDARY]: true,
+        [ATTR_TEST_SUITE_NAME]: this.testSuiteName(block),
+        [ATTR_TEST_SUITE_RUN_STATUS]: TEST_SUITE_RUN_STATUS_VALUE_IN_PROGRESS,
+      };
+    }
+
+    /**
+     * Return the fully qualified test case name.
+     */
+    testCaseName(test: Circus.TestEntry): string {
+      return `${this.testSuiteName(test.parent)}::${test.name}`;
+    }
+
+    /**
+     * Return the fully qualified test suite name.
+     */
+    testSuiteName(block?: Circus.DescribeBlock): string {
+      const names = [this.__testfile, ...this.describeBlockNames(block)];
+      return names.join("::");
+    }
+
+    /**
+     * Return describe block names from outermost to innermost.
+     */
+    describeBlockNames(block?: Circus.DescribeBlock): string[] {
+      const names: string[] = [];
+      let current = block;
+
+      while (current && current.name !== JEST_ROOT_BLOCK_NAME) {
+        names.unshift(current.name);
+        current = current.parent;
+      }
+
+      return names;
+    }
 
     /**
      * Unwrap the first Jest Error that triggered a test failure.
