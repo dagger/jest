@@ -68,6 +68,7 @@ type Jest {
 
     # mount and install the otel library and then execute the tests
     runtime
+      .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
       .withExec(["npx", "jest"] + flags + files)
       .sync
 

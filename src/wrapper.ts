@@ -1,8 +1,10 @@
+import { format } from "node:util";
 import { OtelSDK } from "@dagger.io/telemetry";
 import type { EnvironmentContext, JestEnvironmentConfig } from "@jest/environment";
 import type { Circus } from "@jest/types";
 import type { Attributes, Context, Span } from "@opentelemetry/api";
-import { context, SpanStatusCode, trace } from "@opentelemetry/api";
+import { context, isSpanContextValid, SpanStatusCode, trace } from "@opentelemetry/api";
+import { logs, SeverityNumber } from "@opentelemetry/api-logs";
 import {
   ATTR_TEST_CASE_NAME,
   ATTR_TEST_CASE_RESULT_STATUS,
@@ -16,10 +18,92 @@ import {
 } from "@opentelemetry/semantic-conventions/incubating";
 import type { TestEnvironment } from "jest-environment-node";
 
-const tracer = trace.getTracer("dagger.io/jest");
+__prepareLogExporterEnv();
 
 const JEST_ROOT_BLOCK_NAME = "ROOT_DESCRIBE_BLOCK";
 const ATTR_UI_BOUNDARY = "dagger.io/ui.boundary";
+const STDIO_STREAM_ATTR = "stdio.stream";
+const STDIO_STREAM_STDOUT = 1;
+const STDIO_STREAM_STDERR = 2;
+const __PATCHED_CONSOLE_METHOD = Symbol.for("dagger.io/jest.console.telemetry");
+let __emittingConsoleTelemetry = false;
+
+type ConsoleMethodName = "debug" | "error" | "info" | "log" | "warn";
+type ConsoleStream = "stderr" | "stdout";
+
+function __prepareLogExporterEnv(): void {
+  if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+    __setEnvIfUnset(
+      "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+      __logEndpoint(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT),
+    );
+  }
+
+  __setEnvIfUnset(
+    "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+    process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL ?? process.env.OTEL_EXPORTER_OTLP_PROTOCOL,
+  );
+}
+
+function __setEnvIfUnset(name: string, value?: string): void {
+  if (process.env[name] === undefined && value !== undefined) {
+    process.env[name] = value;
+  }
+}
+
+function __logEndpoint(endpoint?: string): string | undefined {
+  const logEndpoint = endpoint?.replace(/\/v1\/traces\/?$/, "/v1/logs");
+  return logEndpoint !== endpoint ? logEndpoint : undefined;
+}
+
+function __tracer() {
+  return trace.getTracer("dagger.io/jest");
+}
+
+function __logger() {
+  return logs.getLogger("dagger.io/jest");
+}
+
+function __consoleTypeStream(type: string): ConsoleStream | undefined {
+  if (type === "error" || type === "warn") {
+    return "stderr";
+  }
+  if (type === "debug" || type === "info" || type === "log") {
+    return "stdout";
+  }
+  return undefined;
+}
+
+function __emitConsoleTelemetry(stream: ConsoleStream, body: string): void {
+  if (__emittingConsoleTelemetry) {
+    return;
+  }
+
+  const activeContext = context.active();
+  const activeSpan = trace.getSpan(activeContext);
+  if (!activeSpan || !isSpanContextValid(activeSpan.spanContext())) {
+    return;
+  }
+
+  __emittingConsoleTelemetry = true;
+  try {
+    __logger().emit({
+      timestamp: Date.now(),
+      observedTimestamp: Date.now(),
+      severityNumber: stream === "stderr" ? SeverityNumber.ERROR : SeverityNumber.INFO,
+      severityText: stream === "stderr" ? "ERROR" : "INFO",
+      body,
+      attributes: {
+        [STDIO_STREAM_ATTR]: stream === "stderr" ? STDIO_STREAM_STDERR : STDIO_STREAM_STDOUT,
+      },
+      context: activeContext,
+    });
+  } catch {
+    // Do not let telemetry log emission affect the test run.
+  } finally {
+    __emittingConsoleTelemetry = false;
+  }
+}
 
 // A function that take any jest environment and add otel instrumentation on existing tests.
 export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
@@ -76,8 +160,10 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       const apiKey = Symbol.for("opentelemetry.js.api.1");
       (this.global as any)[apiKey] = (globalThis as any)[apiKey];
 
+      this.patchConsoleTelemetry();
+
       // Create a testspan and root context based on the test filename.
-      this.__topLevelSpan = tracer.startSpan(
+      this.__topLevelSpan = __tracer().startSpan(
         this.__testfile,
         {
           attributes: {
@@ -99,9 +185,11 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
       // the test span context so any span created inside it will be correctly
       // nested.
       if (event.name === "test_start") {
+        this.patchConsoleTelemetry();
+
         const ctx = this.getOrCreateContext(event.test.parent);
 
-        const testSpan = tracer.startSpan(
+        const testSpan = __tracer().startSpan(
           event.test.name,
           { attributes: this.testSpanAttributes(event.test) },
           ctx,
@@ -173,7 +261,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
         event.describeBlock.name !== JEST_ROOT_BLOCK_NAME
       ) {
         const ctx = this.getOrCreateContext(event.describeBlock.parent);
-        const span = tracer.startSpan(
+        const span = __tracer().startSpan(
           event.describeBlock.name,
           { attributes: this.testSuiteSpanAttributes(event.describeBlock) },
           ctx,
@@ -245,6 +333,116 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     //////
     // Utility functions
     //////
+
+    patchConsoleTelemetry(): void {
+      const testConsole = (this.global as any).console;
+      if (!testConsole) {
+        return;
+      }
+
+      if (this.patchBufferedConsole(testConsole)) {
+        return;
+      }
+
+      if (this.patchJestConsole(testConsole)) {
+        return;
+      }
+
+      this.patchConsoleMethod(testConsole, "debug", "stdout");
+      this.patchConsoleMethod(testConsole, "info", "stdout");
+      this.patchConsoleMethod(testConsole, "log", "stdout");
+      this.patchConsoleMethod(testConsole, "warn", "stderr");
+      this.patchConsoleMethod(testConsole, "error", "stderr");
+    }
+
+    patchBufferedConsole(testConsole: any): boolean {
+      const consoleCtor = testConsole.constructor as
+        | { write?: ((...args: any[]) => any) & { [__PATCHED_CONSOLE_METHOD]?: boolean } }
+        | undefined;
+      const current = consoleCtor?.write;
+
+      if (!consoleCtor || typeof current !== "function") {
+        return false;
+      }
+      if (current[__PATCHED_CONSOLE_METHOD]) {
+        return true;
+      }
+
+      const patched = function patchedBufferedConsoleWrite(this: any, ...args: any[]) {
+        const [, type, message] = args;
+        const stream = __consoleTypeStream(String(type));
+        if (stream) {
+          __emitConsoleTelemetry(
+            stream,
+            `${typeof message === "string" ? message : format(message)}\n`,
+          );
+        }
+        return current.apply(this, args);
+      } as typeof current;
+
+      patched[__PATCHED_CONSOLE_METHOD] = true;
+      consoleCtor.write = patched;
+      return true;
+    }
+
+    patchJestConsole(testConsole: any): boolean {
+      let patched = false;
+      patched = this.patchJestConsoleMethod(testConsole, "_log", "stdout") || patched;
+      patched = this.patchJestConsoleMethod(testConsole, "_logError", "stderr") || patched;
+      return patched;
+    }
+
+    patchJestConsoleMethod(
+      testConsole: any,
+      method: string,
+      fallbackStream: ConsoleStream,
+    ): boolean {
+      const current = testConsole[method] as
+        | (((...args: any[]) => any) & {
+            [__PATCHED_CONSOLE_METHOD]?: boolean;
+          })
+        | undefined;
+
+      if (typeof current !== "function") {
+        return false;
+      }
+      if (current[__PATCHED_CONSOLE_METHOD]) {
+        return true;
+      }
+
+      const patched = function patchedJestConsoleMethod(this: any, ...args: any[]) {
+        const [type, message] = args;
+        const stream = __consoleTypeStream(String(type)) ?? fallbackStream;
+        __emitConsoleTelemetry(
+          stream,
+          `${typeof message === "string" ? message : format(message)}\n`,
+        );
+        return current.apply(this, args);
+      } as typeof current;
+
+      patched[__PATCHED_CONSOLE_METHOD] = true;
+      testConsole[method] = patched;
+      return true;
+    }
+
+    patchConsoleMethod(testConsole: any, method: ConsoleMethodName, stream: ConsoleStream): void {
+      const current = testConsole[method] as
+        | (((...args: any[]) => void) & { [__PATCHED_CONSOLE_METHOD]?: boolean })
+        | undefined;
+
+      if (typeof current !== "function" || current[__PATCHED_CONSOLE_METHOD]) {
+        return;
+      }
+
+      const original = current.bind(testConsole);
+      const patched = ((...args: any[]) => {
+        __emitConsoleTelemetry(stream, `${format(...args)}\n`);
+        return original(...args);
+      }) as typeof current;
+
+      patched[__PATCHED_CONSOLE_METHOD] = true;
+      testConsole[method] = patched;
+    }
 
     /**
      * Return the attributes for a Jest test case span.
