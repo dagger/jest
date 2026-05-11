@@ -1,0 +1,13 @@
+{
+  "name": "jest-log-output-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules --import @dagger.io/jest/register\" jest"
+  },
+  "devDependencies": {
+    "@dagger.io/jest": "file:../..",
+    "jest": "^30.2.0"
+  }
+}

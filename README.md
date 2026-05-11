@@ -76,6 +76,11 @@ Test spans include `dagger.io/ui.boundary` plus OpenTelemetry test semantic conv
 
 Suite spans include `dagger.io/ui.boundary`, `test.suite.name`, and `test.suite.run.status`.
 
+### Test output
+
+Console output emitted with `console.log`, `console.info`, `console.debug`, `console.warn`,
+and `console.error` is exported as OpenTelemetry logs on the active test span.
+
 ### Installation
 
 Install `@dagger.io/jest` in your project
