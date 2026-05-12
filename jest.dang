@@ -5,17 +5,28 @@ type Jest {
   """
   The source directory for the project.
   """
-  pub source: Directory! @defaultPath(path: "/") @ignorePatterns(patterns: ["**/node_modules", "/dist", "/build"])
+  pub source: Directory!
 
   """
   The base image to use.
   """
-  pub baseImageAddress: String! = "node:25-alpine"
+  pub baseImageAddress: String!
 
   """
   The package manager to use.
   """
-  pub packageManager: String! = "npm"
+  pub packageManager: String!
+
+  new(
+    workspace: Workspace!,
+    baseImageAddress: String! = "node:25-alpine",
+    packageManager: String! = "npm",
+  ) {
+    self.source = workspace.directory("/", exclude: ["**/node_modules", "/dist", "/build"])
+    self.baseImageAddress = baseImageAddress
+    self.packageManager = packageManager
+    self
+  }
 
   """
   Execute the tests
@@ -68,6 +79,7 @@ type Jest {
 
     # mount and install the otel library and then execute the tests
     runtime
+      .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
       .withExec(["npx", "jest"] + flags + files)
       .sync
 

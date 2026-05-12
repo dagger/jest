@@ -1,0 +1,16 @@
+{
+  "name": "jest-log-output",
+  "engineVersion": "v0.19.10",
+  "toolchains": [
+    {
+      "name": "jest",
+      "source": "../../",
+      "customizations": [
+        {
+          "argument": "source",
+          "defaultPath": "/tests/log_output_toolchain_local"
+        }
+      ]
+    }
+  ]
+}

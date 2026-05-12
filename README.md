@@ -70,6 +70,17 @@ Automatically instrument Jest tests for Open Telemetry.
 
 The toolchain does this automatically, however you can use the library without the toolchain as described below.
 
+### Span attributes
+
+Test spans include `dagger.io/ui.boundary` plus OpenTelemetry test semantic convention attributes: `test.case.name`, `test.case.result.status`, and `test.suite.name`.
+
+Suite spans include `dagger.io/ui.boundary`, `test.suite.name`, and `test.suite.run.status`.
+
+### Test output
+
+Console output emitted with `console.log`, `console.info`, `console.debug`, `console.warn`,
+and `console.error` is exported as OpenTelemetry logs on the active test span.
+
 ### Installation
 
 Install `@dagger.io/jest` in your project
