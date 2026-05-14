@@ -79,13 +79,20 @@ function __emitConsoleTelemetry(stream: ConsoleStream, body: string): void {
     return;
   }
 
-  const activeContext = context.active();
-  const activeSpan = trace.getSpan(activeContext);
+  __emittingConsoleTelemetry = true;
+  try {
+    __emitStdioTelemetry(context.active(), stream, body);
+  } finally {
+    __emittingConsoleTelemetry = false;
+  }
+}
+
+function __emitStdioTelemetry(logContext: Context, stream: ConsoleStream, body: string): void {
+  const activeSpan = trace.getSpan(logContext);
   if (!activeSpan || !isSpanContextValid(activeSpan.spanContext())) {
     return;
   }
 
-  __emittingConsoleTelemetry = true;
   try {
     __logger().emit({
       timestamp: Date.now(),
@@ -96,13 +103,15 @@ function __emitConsoleTelemetry(stream: ConsoleStream, body: string): void {
       attributes: {
         [STDIO_STREAM_ATTR]: stream === "stderr" ? STDIO_STREAM_STDERR : STDIO_STREAM_STDOUT,
       },
-      context: activeContext,
+      context: logContext,
     });
   } catch {
     // Do not let telemetry log emission affect the test run.
-  } finally {
-    __emittingConsoleTelemetry = false;
   }
+}
+
+function __formatErrorForLog(error: Error): string {
+  return `${(error.stack || error.message || String(error)).trimEnd()}\n`;
 }
 
 // A function that take any jest environment and add otel instrumentation on existing tests.
@@ -224,16 +233,18 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
           if (hasErrors) {
             span.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, TEST_CASE_RESULT_STATUS_VALUE_FAIL);
 
-            const err = this.firstJestError(event.test.errors);
-            if (err) {
-              span.recordException(err);
-              span.setStatus({
-                code: SpanStatusCode.ERROR,
-                message: err.message,
-              });
-            } else {
-              span.setStatus({ code: SpanStatusCode.ERROR });
+            const testContext = trace.setSpan(context.active(), span);
+            for (const error of event.test.errors) {
+              const err = this.jestError(error);
+              if (err) {
+                span.recordException(err);
+                __emitStdioTelemetry(testContext, "stderr", __formatErrorForLog(err));
+              }
             }
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: "test failed",
+            });
 
             this.setParentAsFailed(event.test.parent);
           } else {
@@ -497,23 +508,22 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     }
 
     /**
-     * Unwrap the first Jest Error that triggered a test failure.
+     * Unwrap a Jest Error that triggered a test failure.
      */
-    firstJestError(errors: any[]): Error | null {
-      if (!errors || !errors.length) return null;
+    jestError(error: any): Error | null {
+      if (!error) return null;
 
-      const first = errors[0];
-      if (Array.isArray(first)) {
-        const [original, asyncErr] = first;
+      if (Array.isArray(error)) {
+        const [original, asyncErr] = error;
         if (original?.stack) return original;
         if (typeof original === "string") return new Error(original);
 
         return asyncErr || new Error("Unknown Jest error");
       }
 
-      if (typeof first === "string") return new Error(first);
+      if (typeof error === "string") return new Error(error);
 
-      return first;
+      return error;
     }
 
     /**
