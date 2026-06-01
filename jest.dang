@@ -49,7 +49,7 @@ type Jest {
     """
     flags: [String!]! = [],
   ): Void @check {
-    let n = node(source, baseImageAddress, packageManager)
+    let n = nodejs(source, baseImageAddress, packageManager)
     let runtime = n.base
 
     # optionally build first
@@ -92,7 +92,7 @@ type Jest {
   pub list: String {
     let cmd = ["npx", "jest", "--listTests"]
 
-    node(source, baseImageAddress, packageManager)
+    nodejs(source, baseImageAddress, packageManager)
       .base
       .withExec(cmd)
       .stdout

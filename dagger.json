@@ -6,7 +6,7 @@
   },
   "dependencies": [
     {
-      "name": "node",
+      "name": "nodejs",
       "source": "github.com/dagger/node@main",
       "pin": "73da7e4e0169ff8075a43abfd54c7f63caf516a3"
     }
