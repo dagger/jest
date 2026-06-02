@@ -18,11 +18,11 @@ type Jest {
   pub packageManager: String!
 
   new(
-    workspace: Workspace!,
+    ws: Workspace!,
     baseImageAddress: String! = "node:25-alpine",
     packageManager: String! = "npm",
   ) {
-    self.source = workspace.directory("/", exclude: ["**/node_modules", "/dist", "/build"])
+    self.source = ws.directory("/", exclude: ["**/node_modules", "/dist", "/build"])
     self.baseImageAddress = baseImageAddress
     self.packageManager = packageManager
     self
