@@ -1,0 +1,2 @@
+[modules.dang-sdk]
+source = "github.com/dagger/dang-sdk"

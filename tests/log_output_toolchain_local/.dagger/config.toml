@@ -1,0 +1,5 @@
+[modules.jest]
+source = "../../.."
+legacy-default-path = true
+# settings.baseImageAddress = ""
+# settings.packageManager = ""
