@@ -1,0 +1,13 @@
+{
+  "name": "e2e",
+  "engineVersion": "v1.0.0-beta.3",
+  "sdk": {
+    "source": "dang"
+  },
+  "dependencies": [
+    {
+      "name": "jest",
+      "source": "../../../"
+    }
+  ]
+}
