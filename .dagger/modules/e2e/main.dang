@@ -1,0 +1,21 @@
+"""
+End-to-end checks for the jest toolchain.
+"""
+type E2e {
+  """
+  The git repository to run tests against as an end-to-end smoke test.
+  """
+  pub repo: String! = "https://github.com/kpenfound/demo-react-app"
+
+  """
+  Run the jest toolchain against a real-world repository.
+
+  This pulls the demo repo, exposes it as a Workspace, and runs the
+  jest `test` check against it end-to-end.
+  """
+  pub testDemoApp: Void @check {
+    let ws = git(repo).head.tree.asWorkspace
+
+    jest(ws).test
+  }
+}

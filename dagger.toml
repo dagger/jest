@@ -1,0 +1,4 @@
+[modules.e2e]
+source = ".dagger/modules/e2e"
+# The git repository to run tests against as an end-to-end smoke test.
+# settings.repo = ""
