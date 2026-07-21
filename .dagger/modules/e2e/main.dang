@@ -11,11 +11,173 @@ type E2e {
   Run the jest toolchain against a real-world repository.
 
   This pulls the demo repo, exposes it as a Workspace, and runs the
-  jest `test` check against it end-to-end.
+  jest `testAll` check against it end-to-end.
   """
   pub testDemoApp: Void @check {
     let ws = git(repo).head.tree.asWorkspace
 
-    jest(ws).test
+    jest().testAll(ws)
+  }
+
+  """
+  A single Jest project, used as the building block of the synthetic
+  multi-project workspaces below. The git metadata and the demo's own
+  dagger.json are dropped so a copy nested inside another copy is an ordinary
+  subdirectory rather than a repository or a module.
+  """
+  let project: Directory! {
+    git(repo).head.tree.filter(exclude: [".git", "dagger.json"])
+  }
+
+  """
+  Two sibling projects under a root that holds no config of its own:
+
+      a/jest.config.js
+      b/jest.config.js
+  """
+  let siblings: Directory! {
+    directory.
+      withDirectory("a", project).
+      withDirectory("b", project)
+  }
+
+  """
+  A root project with a project nested under each of two subdirectories:
+
+      jest.config.js
+      a/jest.config.js
+      b/jest.config.js
+  """
+  let nested: Directory! {
+    project.
+      withDirectory("a", project).
+      withDirectory("b", project)
+  }
+
+  """
+  A root project with a nested project under a subdirectory holding no config
+  of its own:
+
+      jest.config.js
+      work/                  <- no config
+      work/app/jest.config.js
+  """
+  let ancestor: Directory! {
+    project.withDirectory("work/app", project)
+  }
+
+  """
+  Discovery from `cwd` inside a synthetic workspace built from `tree`.
+  """
+  let projects(tree: Directory!, cwd: String!): [String!]! {
+    jest().projects(tree.asWorkspace(cwd: cwd))
+  }
+
+  """
+  Fail unless discovery returned exactly the wanted paths, in any order.
+  """
+  let assertPaths(got: [String!]!, want: [String!]!, context: String!): Void {
+    let rendered = context + ": got [" + got.join(", ") + "], want [" + want.join(", ") + "]"
+
+    if (got.length != want.length) {
+      raise rendered
+    }
+    want.each { path =>
+      if (got.filter { value => value == path }.length != 1) {
+        raise rendered
+      }
+    }
+    null
+  }
+
+  """
+  From a root holding no config, discovery returns every project beneath it;
+  entering one of them scopes discovery to that project alone.
+  """
+  pub siblingDiscoveryCheck: Void @check {
+    assertPaths(projects(siblings, "."), ["a", "b"], "from the workspace root")
+    assertPaths(projects(siblings, "a"), ["."], "from a")
+    assertPaths(projects(siblings, "b"), ["."], "from b")
+
+    null
+  }
+
+  """
+  A root project does not leak into a nested project's view: the config in the
+  cwd shadows the enclosing one, so entering `a` yields `a` alone.
+  """
+  pub nestedDiscoveryCheck: Void @check {
+    assertPaths(projects(nested, "."), [".", "a", "b"], "from the workspace root")
+    assertPaths(projects(nested, "a"), ["."], "from a")
+    assertPaths(projects(nested, "b"), ["."], "from b")
+
+    null
+  }
+
+  """
+  From a subdirectory holding no config, the nearest enclosing project is
+  reported as a ".."-relative path alongside the projects below the cwd, and
+  that path resolves back to the enclosing project through the workspace.
+  """
+  pub ancestorDiscoveryCheck: Void @check {
+    let ws = ancestor.asWorkspace(cwd: "work")
+
+    assertPaths(jest().projects(ws), ["..", "app"], "from work")
+
+    if (ws.directory("..").glob("jest.config.js").length != 1) {
+      raise "the returned ancestor path did not resolve back to the enclosing project"
+    }
+
+    null
+  }
+
+  """
+  A failing test file, used to observe which projects a run actually covered.
+  The demo's jest.config.js roots the run at `src`, so that is where it lands.
+  """
+  let failingTest: String! = "test('fails', () => { expect(1).toBe(2) })\n"
+
+  """
+  Whether `testAll` from `cwd` observed the failure planted in `tree`.
+  """
+  let testAllFailed(tree: Directory!, cwd: String!): Boolean! {
+    try {
+      jest().testAll(tree.asWorkspace(cwd: cwd))
+      false
+    } catch {
+      err => true
+    }
+  }
+
+  """
+  `testAll` runs every project below the cwd, and entering one of them leaves
+  its siblings out of reach.
+  """
+  pub descendantScopeCheck: Void @check {
+    let broken = siblings.withNewFile("b/src/broken.test.js", failingTest)
+
+    if (testAllFailed(broken, ".") == false) {
+      raise "testAll from the workspace root should have run the project b"
+    }
+    if (testAllFailed(broken, "a")) {
+      raise "testAll from a should not have run the sibling project b"
+    }
+    if (testAllFailed(siblings.withNewFile("a/src/broken.test.js", failingTest), "a") == false) {
+      raise "testAll from a should have run a's own tests"
+    }
+
+    null
+  }
+
+  """
+  A cwd holding no config sits inside its enclosing project, so `testAll` runs
+  that project too rather than only the ones below the cwd.
+  """
+  pub ancestorScopeCheck: Void @check {
+    if (testAllFailed(ancestor.withNewFile("src/broken.test.js", failingTest), "work") == false) {
+      raise "testAll from work should have run the enclosing project"
+    }
+
+    null
   }
 }

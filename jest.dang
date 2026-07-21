@@ -3,35 +3,78 @@ Toolchain to execute Jest tests
 """
 type Jest {
   """
-  The source directory for the project.
-  """
-  pub source: Directory!
-
-  """
   The base image to use.
   """
-  pub baseImageAddress: String!
+  pub baseImageAddress: String! = "node:25-alpine"
 
   """
   The package manager to use.
   """
-  pub packageManager: String!
+  pub packageManager: String! = "npm"
 
-  new(
-    ws: Workspace!,
-    baseImageAddress: String! = "node:25-alpine",
-    packageManager: String! = "npm",
-  ) {
-    self.source = ws.directory("/", exclude: ["**/node_modules", "/dist", "/build"])
-    self.baseImageAddress = baseImageAddress
-    self.packageManager = packageManager
-    self
+  """
+  Filenames that mark a Jest project. A `jest` key in package.json also
+  configures Jest, but package.json marks every npm package, so it is not a
+  discovery marker.
+  """
+  let configNames: [String!]! = [
+    "jest.config.js",
+    "jest.config.mjs",
+    "jest.config.cjs",
+    "jest.config.ts",
+    "jest.config.mts",
+    "jest.config.cts",
+    "jest.config.json",
+  ]
+
+  """
+  The Jest projects visible from the client's cwd: every project at or below
+  it, plus the nearest enclosing project when the cwd holds no config of its
+  own. Paths are cwd-relative, so a ".." prefix marks an enclosing project.
+  """
+  pub projects(ws: Workspace!): [String!]! {
+    polyfill().workspace(ws).findConfigDirs(
+      configNames,
+      exclude: ["**/node_modules/**"],
+    )
   }
 
   """
-  Execute the tests
+  Execute the tests of every project visible from the client's cwd. A cwd that
+  holds no config of its own sits inside its enclosing project, so that project
+  runs too; enter a subproject to run it alone.
+  """
+  pub testAll(
+    ws: Workspace!,
+    """
+    Run build before test
+    """
+    build: Boolean! = false,
+    """
+    Use jest-defined environment
+    """
+    useEnv: Boolean! = false,
+    """
+    Flags to pass to jest
+    """
+    flags: [String!]! = [],
+  ): Void @check {
+    projects(ws).each { path =>
+      test(ws, path: path, build: build, useEnv: useEnv, flags: flags)
+    }
+
+    null
+  }
+
+  """
+  Execute the tests of a single project
   """
   pub test(
+    ws: Workspace!,
+    """
+    Path of the project to test, relative to the client's cwd
+    """
+    path: String! = ".",
     """
     List of files to test
     """
@@ -48,8 +91,9 @@ type Jest {
     Flags to pass to jest
     """
     flags: [String!]! = [],
-  ): Void @check {
-    let n = nodejs(source, baseImageAddress, packageManager)
+  ): Void {
+    let src = source(ws, path: path)
+    let n = nodejs(src, baseImageAddress, packageManager)
     let runtime = n.base
 
     # optionally build first
@@ -65,7 +109,7 @@ type Jest {
       let packageType = container
         .from("alpine:3")
         .withExec(["apk", "add", "jq"])
-        .withFile("/package.json", source.file("package.json"))
+        .withFile("/package.json", src.file("package.json"))
         .withExec(["jq", ".type", "/package.json"])
         .stdout
 
@@ -87,15 +131,34 @@ type Jest {
   }
 
   """
-  List the tests
+  List the tests of a single project
   """
-  pub list: String {
+  pub list(
+    ws: Workspace!,
+    """
+    Path of the project to list, relative to the client's cwd
+    """
+    path: String! = ".",
+  ): String {
     let cmd = ["npx", "jest", "--listTests"]
 
-    nodejs(source, baseImageAddress, packageManager)
+    nodejs(source(ws, path: path), baseImageAddress, packageManager)
       .base
       .withExec(cmd)
       .stdout
+  }
+
+  """
+  The source directory of a project, relative to the client's cwd
+  """
+  pub source(
+    ws: Workspace!,
+    """
+    Path of the project, relative to the client's cwd
+    """
+    path: String! = ".",
+  ): Directory! {
+    ws.directory(path, exclude: ["**/node_modules", "dist", "build"])
   }
 
   """
