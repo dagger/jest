@@ -33,8 +33,8 @@ type Jest {
   own. Paths are cwd-relative, so a ".." prefix marks an enclosing project.
   """
   pub projects(ws: Workspace!): [String!]! {
-    polyfill().workspace(ws).findConfigDirs(
-      configNames,
+    ws.findRoots(
+      markers: configNames,
       exclude: ["**/node_modules/**"],
     )
   }
