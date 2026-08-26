@@ -1,6 +1,6 @@
 {
   "name": "jest",
-  "engineVersion": "v0.20.6",
+  "engineVersion": "v1.0.0-beta.10",
   "sdk": {
     "source": "dang"
   },
@@ -9,11 +9,6 @@
       "name": "nodejs",
       "source": "github.com/dagger/node@main",
       "pin": "73da7e4e0169ff8075a43abfd54c7f63caf516a3"
-    },
-    {
-      "name": "polyfill",
-      "source": "github.com/dagger/polyfill@main",
-      "pin": "e90bbfc4843258a877a3a95b8db1571e7981e65f"
     }
   ]
 }
