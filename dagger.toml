@@ -13,7 +13,3 @@ module = "dagger-dang-sdk"
 clients = ["github.com/dagger/node"]
 is-module = true
 name = "jest"
-
-[sdks.dang.scopes.".dagger/modules/e2e"]
-clients = ["./."]
-is-module = true
