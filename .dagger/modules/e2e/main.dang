@@ -106,25 +106,31 @@ type E2e {
 
   """
   From a root holding no config, discovery returns every project beneath it;
-  entering one of them scopes discovery to that project alone. Keys stay
-  workspace-root-relative wherever the client stands.
+  entering one of them, or any directory inside it, scopes discovery to that
+  project alone. Keys stay workspace-root-relative wherever the client stands.
   """
   siblingDiscoveryCheck: Void @check {
     assertKeys(projects(siblings, "."), ["a", "b"], "from the workspace root")
     assertKeys(projects(siblings, "a"), ["a"], "from a")
     assertKeys(projects(siblings, "b"), ["b"], "from b")
+    assertKeys(projects(siblings, "a/src"), ["a"], "from a/src")
+    assertKeys(projects(siblings, "b/src/components"), ["b"], "from b/src/components")
 
     null
   }
 
   """
   A root project does not leak into a nested project's view: the config in the
-  cwd shadows the enclosing one, so entering `a` yields `a` alone.
+  cwd shadows the enclosing one, so entering `a`, or a directory inside it,
+  yields `a` alone, and a directory inside the root project yields the root
+  project.
   """
   nestedDiscoveryCheck: Void @check {
     assertKeys(projects(nested, "."), [".", "a", "b"], "from the workspace root")
     assertKeys(projects(nested, "a"), ["a"], "from a")
     assertKeys(projects(nested, "b"), ["b"], "from b")
+    assertKeys(projects(nested, "a/src"), ["a"], "from a/src")
+    assertKeys(projects(nested, "src"), ["."], "from src")
 
     null
   }
@@ -293,6 +299,12 @@ type E2e {
     }
     if (projectsFailed(broken, "a")) {
       raise "running the projects from a should not have run the sibling project b"
+    }
+    if (projectsFailed(broken, "a/src")) {
+      raise "running the projects from a/src should not have run the sibling project b"
+    }
+    if (projectsFailed(broken, "b/src") == false) {
+      raise "running the projects from b/src should have run the enclosing project b"
     }
     if (projectsFailed(
       siblings.withNewFile("a/src/broken.test.js", failingTest),

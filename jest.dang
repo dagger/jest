@@ -172,29 +172,40 @@ type JestProject {
     JestTestFiles(files: testFiles(ws), project: self)
   }
 
-  # Test files are found by globbing the workspace for Jest's default
-  # testMatch rather than asking jest --listTests, so listing tests runs no
-  # container. A project's own config is not evaluated: a custom testMatch,
-  # roots or testPathIgnorePatterns is not seen. node_modules, the dist and
-  # build directories left out of the source, and nested projects are skipped.
+  # Test files are found with one ripgrep search over the project for Jest's
+  # default testMatch rather than asking jest --listTests, so listing tests
+  # runs no container. node_modules is pruned by the search itself. The same
+  # search finds the config files of nested projects, whose subtrees belong to
+  # them. A project's own config is not evaluated: a custom testMatch, roots or
+  # testPathIgnorePatterns is not seen. The dist and build directories left
+  # out of the source are skipped too.
   let testFiles(ws: Workspace!): [String!]! {
     let prefix = if (path == ".") { "" } else { path + "/" }
-    let nested = tool
-      .projectRoots(ws, rootPath)
-      .filter { root => root != path }
-      .map { root => root.trimPrefix(prefix) + "/" }
-    let empty: [String!]! = []
-    let found = [
-      "**/__tests__/**",
-      "**/*test.*",
-      "**/*spec.*",
-    ].reduce(empty) { acc, pattern => acc + ws.glob(prefix + pattern) }
+    let found = ws
+      .search(
+        paths: [rootPath],
+        globs: [
+          "**/__tests__/**",
+          "*test.*",
+          "*spec.*",
+          "jest.config.*",
+          "!node_modules",
+          "!.git",
+        ],
+        pattern: "",
+        filesOnly: true,
+      ).{{filePath}}
+      .map { match => match.filePath.trimPrefix("/").trimPrefix("./").trimPrefix(prefix) }
+      .filter { file => file.containsMatch(`(^|/)node_modules/`) == false }
+    let nested = found
+      .filter { file =>
+        tool.configNames.any { name => file.hasSuffix("/" + name) }
+      }
+      .map { file => file.split("/").dropLast(1).join("/") + "/" }
     tool.sorted(
       found
-        .map { file => file.trimPrefix("/").trimPrefix("./").trimPrefix(prefix) }
         .filter { file =>
           file.containsMatch(`((^|/)__tests__/.*|(^|/)([^/]*\.)?(spec|test)+)\.[mc]?[jt]sx?$`)
-            and file.containsMatch(`(^|/)node_modules/`) == false
             and file.hasPrefix("dist/") == false
             and file.hasPrefix("build/") == false
             and nested.any { dir => file.hasPrefix(dir) } == false
