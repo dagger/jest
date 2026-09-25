@@ -13,6 +13,22 @@ type Jest {
   packageManager: String! = "npm"
 
   """
+  Run the package's build script before testing.
+  """
+  build: Boolean! = false
+
+  """
+  Use the Jest environment configured by the project instead of injecting
+  the Dagger register hook.
+  """
+  useEnv: Boolean! = false
+
+  """
+  Extra flags passed to every jest run.
+  """
+  flags: [String!]! = []
+
+  """
   Filenames that mark a Jest project. A `jest` key in package.json also
   configures Jest, but package.json marks every npm package, so it is not a
   discovery marker.
@@ -28,137 +44,48 @@ type Jest {
   ]
 
   """
-  The Jest projects visible from the client's cwd: every project at or below
-  it, plus the nearest enclosing project when the cwd holds no config of its
-  own. Paths are cwd-relative, so a ".." prefix marks an enclosing project.
+  Jest projects at or below the working directory, plus the enclosing one,
+  keyed by project root.
   """
-  projects(ws: Workspace!): [String!]! {
-    ws.findRoots(
-      markers: configNames,
-      exclude: ["**/node_modules/**"],
+  projects(ws: Workspace!): JestProjects! {
+    JestProjects(paths: projectRoots(ws, "."), tool: self)
+  }
+
+  """
+  Workspace-root-relative roots of the Jest projects found from start: every
+  project at or below it, plus the nearest enclosing project when start holds
+  no config of its own. node_modules is not searched.
+  """
+  let projectRoots(ws: Workspace!, start: String!): [String!]! {
+    sorted(
+      ws
+        .findRoots(start: start, markers: configNames, exclude: ["**/node_modules/**"])
+        .map { dir => workspaceRootPath(ws, dir) }
+        .uniq,
     )
   }
 
   """
-  Execute the tests of every project visible from the client's cwd. A cwd that
-  holds no config of its own sits inside its enclosing project, so that project
-  runs too; enter a subproject to run it alone.
+  Resolve a path relative to the client's cwd, as findRoots returns them, into
+  a workspace-root-relative one, collapsing any leading "..".
   """
-  testAll(
-    ws: Workspace!,
-    """
-    Run build before test
-    """
-    build: Boolean! = false,
-    """
-    Use jest-defined environment
-    """
-    useEnv: Boolean! = false,
-    """
-    Flags to pass to jest
-    """
-    flags: [String!]! = [],
-  ): Void @check {
-    projects(ws).each { path =>
-      test(ws, path: path, build: build, useEnv: useEnv, flags: flags)
-    }
-
-    null
+  let workspaceRootPath(ws: Workspace!, cwdRelPath: String!): String! {
+    let segments = cwdRelPath.split("/").filter { s => s != "" and s != "." }
+    let up = segments.filter { s => s == ".." }.length
+    let down = segments.filter { s => s != ".." }
+    let resolved = ws.cwd.split("/").filter { s => s != "" }.dropLast(up) + down
+    if (resolved.length == 0) { "." } else { resolved.join("/") }
   }
 
   """
-  Execute the tests of a single project
+  Strings in byte order. Keys feed cache keys and batch arguments, so their
+  order must not depend on how the filesystem was walked.
   """
-  test(
-    ws: Workspace!,
-    """
-    Path of the project to test, relative to the client's cwd
-    """
-    path: String! = ".",
-    """
-    List of files to test
-    """
-    files: [String!]! = [],
-    """
-    Run build before test
-    """
-    build: Boolean! = false,
-    """
-    Use jest-defined environment
-    """
-    useEnv: Boolean! = false,
-    """
-    Flags to pass to jest
-    """
-    flags: [String!]! = [],
-  ): Void {
-    let src = source(ws, path: path)
-    let n = nodejs(src, baseImageAddress, packageManager)
-    let runtime = n.base
-
-    # optionally build first
-    if (build) {
-      runtime = runtime.withExec([packageManager, "run", "build"])
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
     }
-
-    # install the local build of the otel library
-    runtime = n.withInstallLocalPackage(runtime, buildLibrary)
-
-    # use the automatic environment instead of a custom jest environment
-    if (!useEnv) {
-      let packageType = container
-        .from("alpine:3")
-        .withExec(["apk", "add", "jq"])
-        .withFile("/package.json", src.file("package.json"))
-        .withExec(["jq", ".type", "/package.json"])
-        .stdout
-
-      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-      if (packageType.contains("commonjs")) {
-        opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
-      }
-      runtime = runtime
-        .withEnvVariable("NODE_OPTIONS", opts, expand: true)
-    }
-
-    # mount and install the otel library and then execute the tests
-    runtime
-      .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
-      .withExec(["npx", "jest"] + flags + files)
-      .sync
-
-    null
-  }
-
-  """
-  List the tests of a single project
-  """
-  list(
-    ws: Workspace!,
-    """
-    Path of the project to list, relative to the client's cwd
-    """
-    path: String! = ".",
-  ): String {
-    let cmd = ["npx", "jest", "--listTests"]
-
-    nodejs(source(ws, path: path), baseImageAddress, packageManager)
-      .base
-      .withExec(cmd)
-      .stdout
-  }
-
-  """
-  The source directory of a project, relative to the client's cwd
-  """
-  source(
-    ws: Workspace!,
-    """
-    Path of the project, relative to the client's cwd
-    """
-    path: String! = ".",
-  ): Directory! {
-    ws.directory(path, exclude: ["**/node_modules", "dist", "build"])
   }
 
   """
@@ -176,5 +103,252 @@ type Jest {
       .withExec(["bun", "install"])
       .withExec(["bun", "run", "build"])
       .directory("/src")
+  }
+}
+
+"""
+Jest projects in a workspace, keyed by project root.
+"""
+type JestProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  """
+  Settings every project runs with.
+  """
+  let tool: Jest!
+
+  """
+  The Jest project rooted at path.
+  """
+  project(path: String!): JestProject! @get {
+    JestProject(path: path, tool: tool)
+  }
+
+  """
+  Run tests in the selected Jest projects.
+  """
+  test(ws: Workspace!): Void {
+    # A selection over a list evaluates its elements concurrently, so all
+    # projects run in parallel.
+    let failures = paths.map { p => project(p) }.{{path, failure: testFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "Jest tests failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
+    null
+  }
+}
+
+"""
+A Jest project rooted at a workspace-relative path.
+"""
+type JestProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  """
+  Settings this project runs with.
+  """
+  let tool: Jest!
+
+  """
+  The project root as an absolute workspace path.
+  """
+  let rootPath: String! {
+    if (path == ".") { "/" } else { "/" + path }
+  }
+
+  """
+  Test files in this project, keyed by project-relative path.
+  """
+  tests(ws: Workspace!): JestTestFiles! {
+    JestTestFiles(files: testFiles(ws), project: self)
+  }
+
+  # Test files are found by globbing the workspace for Jest's default
+  # testMatch rather than asking jest --listTests, so listing tests runs no
+  # container. A project's own config is not evaluated: a custom testMatch,
+  # roots or testPathIgnorePatterns is not seen. node_modules, the dist and
+  # build directories left out of the source, and nested projects are skipped.
+  let testFiles(ws: Workspace!): [String!]! {
+    let prefix = if (path == ".") { "" } else { path + "/" }
+    let nested = tool
+      .projectRoots(ws, rootPath)
+      .filter { root => root != path }
+      .map { root => root.trimPrefix(prefix) + "/" }
+    let empty: [String!]! = []
+    let found = [
+      "**/__tests__/**",
+      "**/*test.*",
+      "**/*spec.*",
+    ].reduce(empty) { acc, pattern => acc + ws.glob(prefix + pattern) }
+    tool.sorted(
+      found
+        .map { file => file.trimPrefix("/").trimPrefix("./").trimPrefix(prefix) }
+        .filter { file =>
+          file.containsMatch(`((^|/)__tests__/.*|(^|/)([^/]*\.)?(spec|test)+)\.[mc]?[jt]sx?$`)
+            and file.containsMatch(`(^|/)node_modules/`) == false
+            and file.hasPrefix("dist/") == false
+            and file.hasPrefix("build/") == false
+            and nested.any { dir => file.hasPrefix(dir) } == false
+        }
+        .uniq,
+    )
+  }
+
+  """
+  Run tests in this project.
+  """
+  test(ws: Workspace!): Void {
+    let failure = testFailure(ws)
+    if (failure != null) {
+      raise "Jest project " + path + ": " + failure
+    }
+    null
+  }
+
+  """
+  Error message from running this project's tests, or null when they pass.
+  """
+  let testFailure(ws: Workspace!): String {
+    { jestExec(ws, []).sync; null } rescue {
+      err: Error => err.message
+    }
+  }
+
+  """
+  Run the given project-relative test files, naming this project when they
+  fail. A file Jest's own config does not treat as a test runs nothing.
+  """
+  let runFiles(ws: Workspace!, files: [String!]!): Void {
+    jestExec(ws, ["--passWithNoTests", "--runTestsByPath"] + files).sync rescue {
+      err: Error => raise "Jest tests in " + path + ": " + err.message
+    }
+    null
+  }
+
+  """
+  Container that has run jest in this project with the given arguments.
+  """
+  let jestExec(ws: Workspace!, args: [String!]!): Container! {
+    let src = source(ws)
+    let n = nodejs(src, tool.baseImageAddress, tool.packageManager)
+    let runtime = n.base
+
+    # optionally build first
+    if (tool.build) {
+      runtime = runtime.withExec([tool.packageManager, "run", "build"])
+    }
+
+    # install the local build of the otel library
+    runtime = n.withInstallLocalPackage(runtime, tool.buildLibrary)
+
+    # use the automatic environment instead of a custom jest environment
+    if (!tool.useEnv) {
+      let packageType = container
+        .from("alpine:3")
+        .withExec(["apk", "add", "jq"])
+        .withFile("/package.json", src.file("package.json"))
+        .withExec(["jq", ".type", "/package.json"])
+        .stdout
+
+      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
+      if (packageType.contains("commonjs")) {
+        opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+      }
+      runtime = runtime
+        .withEnvVariable("NODE_OPTIONS", opts, expand: true)
+    }
+
+    runtime
+      .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
+      .withExec(["npx", "jest"] + tool.flags + args)
+  }
+
+  """
+  List the tests Jest finds in this project.
+  """
+  list(ws: Workspace!): String {
+    nodejs(source(ws), tool.baseImageAddress, tool.packageManager)
+      .base
+      .withExec(["npx", "jest", "--listTests"])
+      .stdout
+  }
+
+  """
+  Source directory of this project.
+  """
+  source(ws: Workspace!): Directory! {
+    ws.directory(rootPath, exclude: ["**/node_modules", "dist", "build"])
+  }
+}
+
+"""
+Test files in a Jest project, keyed by project-relative path.
+"""
+type JestTestFiles @collection {
+  """
+  Test file paths, relative to the project root.
+  """
+  files: [String!]! @keys
+
+  """
+  Test files selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta
+
+  let project: JestProject!
+
+  """
+  The test file at this path.
+  """
+  file(path: String!): JestTestFile! @get {
+    JestTestFile(path: path, project: project)
+  }
+
+  """
+  Run the selected test files in this project.
+  """
+  test(ws: Workspace!): Void @check {
+    # With nothing selected out, run the project as a whole with its own
+    # config rather than listing every file. Without a delta, the explicit
+    # list is the safe choice.
+    let whole = if (delta == null) {
+      false
+    } else {
+      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
+    }
+    if (whole) {
+      project.test(ws)
+    } else if (files.length > 0) {
+      project.runFiles(ws, files)
+    }
+    null
+  }
+}
+
+"""
+A Jest test file.
+"""
+type JestTestFile {
+  """
+  Test file path, relative to the project root.
+  """
+  path: String!
+
+  let project: JestProject!
+
+  """
+  Run this test file.
+  """
+  test(ws: Workspace!): Void @check {
+    project.runFiles(ws, [path])
   }
 }

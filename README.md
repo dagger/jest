@@ -3,82 +3,83 @@
 ## Installation
 
 ```
-dagger toolchain install github.com/dagger/jest
+dagger install github.com/dagger/jest
 ```
 
-## Functions
+Requires Dagger engine `v1.0.0-beta.15` or later.
 
-- `projects`: List the Jest projects visible from the current directory
-- `testAll`: Execute the tests of every visible project (the automatic check)
-- `test`: Execute the tests of a single project
-- `list`: List the tests of a single project
+## Projects and test files
 
-## Project discovery
+`projects` returns the Jest projects visible from the directory you run Dagger
+from, as a collection keyed by project root. Each project's test files are a
+collection too, keyed by path relative to the project. `dagger check` runs one
+check per project, `jest/projects/tests/test`, over the selected test files:
 
-Discovery is anchored at the directory you run Dagger from, not at the workspace
-root: `dagger check` tests the project you are in and the projects beneath it. A
-project is any directory holding a `jest.config.*` file (`node_modules`
-excluded); a `jest` key in `package.json` also configures Jest, but
-`package.json` marks every npm package, so it is not a discovery marker.
-
-```bash
-# from the workspace root of a monorepo holding a/ and b/
-dagger call jest projects   # -> a, b
-
-# from a/
-dagger call jest projects   # -> .
+```console
+$ dagger list jest-projects
+$ dagger list jest-test-files --jest-project=web
+$ dagger check -l --all --jest -f=cli            # one line per test file, as flags to reuse
+$ dagger check --jest                            # every visible project
+$ dagger check --jest --jest-project=web         # one project
+$ dagger check --jest --jest-project=web --jest-test-file=src/App.test.jsx
+$ dagger check jest/projects/tests/test --jest-test-file=src/App.test.jsx
 ```
+
+With every test file of a project selected, the check runs `npx jest` in the
+project with no file arguments, so Jest's own configuration decides what runs.
+With some filtered out, it runs `npx jest --runTestsByPath <files>` over the
+selected files only.
+
+On a project: `test` (run all its tests; a plain function, not a check, so
+`dagger check` does not run them twice), `tests`, `list` (`jest --listTests`)
+and `source`. The `projects` collection also has a batch `test` that runs every
+selected project and lists each failing one by path.
+
+### Project discovery
+
+Discovery is anchored at the directory you run Dagger from: `dagger check`
+tests the project you are in and the projects beneath it. A project is any
+directory holding a `jest.config.*` file (`node_modules` excluded); a `jest` key
+in `package.json` also configures Jest, but `package.json` marks every npm
+package, so it is not a discovery marker.
 
 A directory holding no config of its own sits inside its enclosing project, so
-that project is reported as a `..`-relative path and runs too. To run a single
-project, enter it.
+that project is included too. Project keys are always relative to the
+workspace root, wherever you stand:
 
-## Customization
+```console
+# a monorepo holding a/ and b/
+$ dagger list jest-projects        # -> a, b
+$ cd a && dagger list jest-projects  # -> a
+```
 
-The toolchain can be customized in your `dagger.json` to meet your needs:
+### Test file discovery
 
-```json
-{
-  "name": "my-module",
-  "engineVersion": "...",
-  "toolchains": [
-    {
-      "name": "jest",
-      "source": "github.com/dagger/jest@main",
-      "pin": "...",
-      "customizations": [
-        {
-          "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image 
-        },
-        {
-          "argument": "packageManager",
-          "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
-        },
-        {
-          "function": ["test"],
-          "argument": "files",
-          "default": ["Test1.js", "Test2.js"]   # default: [] (all); List of files to test
-        },
-        {
-          "function": ["test"],
-          "argument": "build",
-          "default": true   # default: false; Run build before test
-        },
-        {
-          "function": ["test"],
-          "argument": "useEnv",
-          "default": true   # default: false; Use jest-defined environment
-        },
-        {
-          "function": ["test"],
-          "argument": "flags",
-          "default": ["--debug"]   # default: []; Flags to pass to jest
-        }
-      ]
-    }
-  ]
-}
+Test files are found by matching the workspace against Jest's default
+`testMatch` (`**/__tests__/**/*.[jt]s?(x)` and
+`**/?(*.)+(spec|test).[jt]s?(x)`, with the `.mjs`/`.cjs`/`.mts`/`.cts`
+variants), so listing them runs no container. `node_modules`, the project's
+`dist` and `build` directories and nested Jest projects are left out.
+
+The project's Jest configuration is not evaluated: a custom `testMatch`,
+`testRegex`, `roots` or `testPathIgnorePatterns` in a JavaScript config is not
+seen. A file that Jest's config excludes may still be listed, and selecting it
+alone runs nothing. A test that only a custom `testMatch` finds is not listed,
+but still runs whenever the whole project runs. A project in which no test file
+matches the default pattern reports no test files, so `dagger check` does not
+run it; call its `test` function instead.
+
+## Settings
+
+Configure the toolchain in your workspace `dagger.toml`:
+
+```toml
+[modules.jest.settings]
+baseImageAddress = "node:22"   # default: node:25-alpine; use any container image
+packageManager = "yarn"        # default: npm; alternatively use yarn, pnpm, or bun
+build = true                   # default: false; run the build script before testing
+useEnv = true                  # default: false; use the project's own Jest environment
+flags = ["--ci"]               # default: []; flags passed to every jest run
 ```
 
 ## Jest OpenTelemetry auto instrumentation
