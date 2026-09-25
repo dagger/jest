@@ -7,16 +7,36 @@ type E2e {
   """
   repo: String! = "https://github.com/kpenfound/demo-react-app"
 
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) {
+      raise message
+    }
+    null
+  }
+
+  """
+  Run a check, raising its failure. A check called through a dependency comes
+  back as a Check that has not run.
+  """
+  let run(check: Check!): Void {
+    # Check.error is not null for a passing check when read from Dang, so ask
+    # pass first and read the message only on failure.
+    if (check.pass == false) {
+      raise check.error.message ?? "check failed"
+    }
+    null
+  }
+
   """
   Run the jest toolchain against a real-world repository.
 
-  This pulls the demo repo, exposes it as a Workspace, and runs the
-  jest `testAll` check against it end-to-end.
+  This pulls the demo repo, exposes it as a Workspace, and runs the batch
+  check over its test files end-to-end.
   """
   testDemoApp: Void @check {
     let ws = git(repo).head.tree.asWorkspace
 
-    jest.testAll(ws)
+    run(jest.projects(ws).get(key: ".").tests(ws).batch.test(ws))
   }
 
   """
@@ -67,117 +87,339 @@ type E2e {
   }
 
   """
-  Discovery from `cwd` inside a synthetic workspace built from `tree`.
+  Project keys discovered from `cwd` inside a synthetic workspace built from
+  `tree`.
   """
   let projects(tree: Directory!, cwd: String!): [String!]! {
-    jest.projects(tree.asWorkspace(cwd: cwd))
+    jest.projects(tree.asWorkspace(cwd: cwd)).keys
   }
 
   """
-  Fail unless discovery returned exactly the wanted paths, in any order.
+  Fail unless discovery returned exactly the wanted keys, in order.
   """
-  let assertPaths(got: [String!]!, want: [String!]!, context: String!): Void {
-    let rendered = context + ": got [" + got.join(", ") + "], want [" + want.join(", ") + "]"
-
-    if (got.length != want.length) {
-      raise rendered
-    }
-    want.each { path =>
-      if (got.filter { value => value == path }.length != 1) {
-        raise rendered
-      }
-    }
-    null
+  let assertKeys(got: [String!]!, want: [String!]!, context: String!): Void {
+    assert(
+      got == want,
+      context + ": got [" + got.join(", ") + "], want [" + want.join(", ") + "]",
+    )
   }
 
   """
   From a root holding no config, discovery returns every project beneath it;
-  entering one of them scopes discovery to that project alone.
+  entering one of them, or any directory inside it, scopes discovery to that
+  project alone. Keys stay workspace-root-relative wherever the client stands.
   """
   siblingDiscoveryCheck: Void @check {
-    assertPaths(projects(siblings, "."), ["a", "b"], "from the workspace root")
-    assertPaths(projects(siblings, "a"), ["."], "from a")
-    assertPaths(projects(siblings, "b"), ["."], "from b")
+    assertKeys(projects(siblings, "."), ["a", "b"], "from the workspace root")
+    assertKeys(projects(siblings, "a"), ["a"], "from a")
+    assertKeys(projects(siblings, "b"), ["b"], "from b")
+    assertKeys(projects(siblings, "a/src"), ["a"], "from a/src")
+    assertKeys(projects(siblings, "b/src/components"), ["b"], "from b/src/components")
 
     null
   }
 
   """
   A root project does not leak into a nested project's view: the config in the
-  cwd shadows the enclosing one, so entering `a` yields `a` alone.
+  cwd shadows the enclosing one, so entering `a`, or a directory inside it,
+  yields `a` alone, and a directory inside the root project yields the root
+  project.
   """
   nestedDiscoveryCheck: Void @check {
-    assertPaths(projects(nested, "."), [".", "a", "b"], "from the workspace root")
-    assertPaths(projects(nested, "a"), ["."], "from a")
-    assertPaths(projects(nested, "b"), ["."], "from b")
+    assertKeys(projects(nested, "."), [".", "a", "b"], "from the workspace root")
+    assertKeys(projects(nested, "a"), ["a"], "from a")
+    assertKeys(projects(nested, "b"), ["b"], "from b")
+    assertKeys(projects(nested, "a/src"), ["a"], "from a/src")
+    assertKeys(projects(nested, "src"), ["."], "from src")
 
     null
   }
 
   """
   From a subdirectory holding no config, the nearest enclosing project is
-  reported as a ".."-relative path alongside the projects below the cwd, and
-  that path resolves back to the enclosing project through the workspace.
+  reported alongside the projects below the cwd, and its key resolves back to
+  the enclosing project's source.
   """
   ancestorDiscoveryCheck: Void @check {
     let ws = ancestor.asWorkspace(cwd: "work")
+    let found = jest.projects(ws)
 
-    assertPaths(jest.projects(ws), ["..", "app"], "from work")
-
-    if (ws.directory("..").glob("jest.config.js").length != 1) {
-      raise "the returned ancestor path did not resolve back to the enclosing project"
-    }
+    assertKeys(found.keys, [".", "work/app"], "from work")
+    assert(
+      found.get(key: ".").source(ws).glob("jest.config.js").length == 1,
+      "the enclosing project's key did not resolve back to its source",
+    )
+    assert(
+      found.get(key: "work/app").source(ws).glob("jest.config.js").length == 1,
+      "the nested project's key did not resolve back to its source",
+    )
 
     null
   }
 
   """
-  A failing test file, used to observe which projects a run actually covered.
+  Projects form a collection keyed by root: get builds the project at its key;
+  subset keeps parent order, rejects unknown and duplicate keys, and narrows
+  what get accepts; an empty subset is valid and runs nothing.
+  """
+  projectCollectionCheck: Void @check {
+    let ws = nested.asWorkspace
+    let found = jest.projects(ws)
+
+    assert(found.get(key: "a").path == "a", "get did not return the project at its key")
+    assert(
+      found.list.{{path}}.map { p => p.path } == found.keys,
+      "list did not return one project per key, in key order",
+    )
+
+    let pair = found.subset(keys: ["b", "a"])
+    assertKeys(pair.keys, ["a", "b"], "subset order")
+
+    let outside = { pair.get(key: ".").path } rescue {
+      err: Error => "rejected"
+    }
+    assert(outside == "rejected", "get accepted a key outside the subset")
+
+    let unknown = { found.subset(keys: ["no/such/project"]).keys.join(","); "accepted" } rescue {
+      err: Error => "rejected"
+    }
+    assert(unknown == "rejected", "subset accepted an unknown key")
+
+    let duplicate = { found.subset(keys: ["a", "a"]).keys.join(","); "accepted" } rescue {
+      err: Error => "rejected"
+    }
+    assert(duplicate == "rejected", "subset accepted a duplicate key")
+
+    let none = found.subset(keys: [])
+    assert(none.keys.length == 0, "empty subset kept keys: " + none.keys.join(", "))
+    none.batch.test(ws)
+
+    null
+  }
+
+  """
+  Test files are found statically with Jest's default testMatch, keyed by
+  project-relative path in byte order. node_modules, the dist and build
+  directories and nested projects are left out, and so are files that only
+  look like tests.
+  """
+  testFileDiscoveryCheck: Void @check {
+    let test = "test('passes', () => {})\n"
+    let tree = directory
+      .withNewFile("jest.config.js", "module.exports = {}\n")
+      .withNewFile("src/a.test.js", test)
+      .withNewFile("src/a.test.js.snap", test)
+      .withNewFile("src/util.js", test)
+      .withNewFile("src/testing.js", test)
+      .withNewFile("src/latest.js", test)
+      .withNewFile("__tests__/b.js", test)
+      .withNewFile("__tests__/deep/c.tsx", test)
+      .withNewFile("__tests__/notes.md", test)
+      .withNewFile("test.js", test)
+      .withNewFile("x.test.mjs", test)
+      .withNewFile("y.spec.cts", test)
+      .withNewFile("node_modules/dep/d.test.js", test)
+      .withNewFile("lib/node_modules/dep/__tests__/e.js", test)
+      .withNewFile("dist/f.test.js", test)
+      .withNewFile("build/g.test.js", test)
+      .withNewFile("sub/jest.config.js", "module.exports = {}\n")
+      .withNewFile("sub/h.spec.ts", test)
+      .withNewFile("sub/__tests__/i.js", test)
+    let ws = tree.asWorkspace
+    let found = jest.projects(ws)
+
+    assertKeys(found.keys, [".", "sub"], "projects")
+    assertKeys(
+      found.get(key: ".").tests(ws).keys,
+      [
+        "__tests__/b.js",
+        "__tests__/deep/c.tsx",
+        "src/a.test.js",
+        "test.js",
+        "x.test.mjs",
+        "y.spec.cts",
+      ],
+      "root test files",
+    )
+    assertKeys(
+      found.get(key: "sub").tests(ws).keys,
+      ["__tests__/i.js", "h.spec.ts"],
+      "nested test files",
+    )
+
+    # Keys do not depend on where the client stands.
+    let inside = tree.asWorkspace(cwd: "sub")
+    assertKeys(
+      jest.projects(inside).get(key: "sub").tests(inside).keys,
+      ["__tests__/i.js", "h.spec.ts"],
+      "nested test files from sub",
+    )
+
+    null
+  }
+
+  """
+  A failing test file, used to observe which files a run actually covered.
   The demo's jest.config.js roots the run at `src`, so that is where it lands.
   """
   let failingTest: String! = "test('fails', () => { expect(1).toBe(2) })\n"
 
   """
-  Whether `testAll` from `cwd` observed the failure planted in `tree`.
+  Whether running the projects visible from `cwd` observed the failure planted
+  in `tree`.
   """
-  let testAllFailed(tree: Directory!, cwd: String!): Boolean! {
+  let projectsFailed(tree: Directory!, cwd: String!): Boolean! {
+    let ws = tree.asWorkspace(cwd: cwd)
+    let observed = {
+      jest.projects(ws).batch.test(ws)
+      false
+    } rescue true
+    observed
+  }
+
+  """
+  Whether a check observed a failure.
+  """
+  let failed(check: Check!): Boolean! {
     {
-      jest.testAll(tree.asWorkspace(cwd: cwd))
+      run(check)
       false
     } rescue true
   }
 
   """
-  `testAll` runs every project below the cwd, and entering one of them leaves
-  its siblings out of reach.
+  The projects batch runs every project below the cwd, and entering one of
+  them leaves its siblings out of reach.
   """
   descendantScopeCheck: Void @check {
     let broken = siblings.withNewFile("b/src/broken.test.js", failingTest)
 
-    if (testAllFailed(broken, ".") == false) {
-      raise "testAll from the workspace root should have run the project b"
+    if (projectsFailed(broken, ".") == false) {
+      raise "running the projects from the workspace root should have run the project b"
     }
-    if (testAllFailed(broken, "a")) {
-      raise "testAll from a should not have run the sibling project b"
+    if (projectsFailed(broken, "a")) {
+      raise "running the projects from a should not have run the sibling project b"
     }
-    if (testAllFailed(
+    if (projectsFailed(broken, "a/src")) {
+      raise "running the projects from a/src should not have run the sibling project b"
+    }
+    if (projectsFailed(broken, "b/src") == false) {
+      raise "running the projects from b/src should have run the enclosing project b"
+    }
+    if (projectsFailed(
       siblings.withNewFile("a/src/broken.test.js", failingTest),
       "a",
     ) == false) {
-      raise "testAll from a should have run a's own tests"
+      raise "running the projects from a should have run a's own tests"
     }
 
     null
   }
 
   """
-  A cwd holding no config sits inside its enclosing project, so `testAll` runs
-  that project too rather than only the ones below the cwd.
+  A cwd holding no config sits inside its enclosing project, so running the
+  projects from it runs that project too rather than only the ones below it.
   """
   ancestorScopeCheck: Void @check {
-    if (testAllFailed(ancestor.withNewFile("src/broken.test.js", failingTest), "work") == false) {
-      raise "testAll from work should have run the enclosing project"
+    if (projectsFailed(
+      ancestor.withNewFile("src/broken.test.js", failingTest),
+      "work",
+    ) == false) {
+      raise "running the projects from work should have run the enclosing project"
     }
+
+    null
+  }
+
+  """
+  A project's test files form a nested collection. Selecting only passing
+  files runs just those, even beside a failing one; selecting the failing file
+  fails; and with nothing selected out the project runs natively with its own
+  config, which reaches tests static discovery leaves out (here, a nested
+  project's), while a filtered run does not.
+  """
+  testFileRunCheck: Void @check {
+    let tree = project
+      .withNewFile("src/broken.test.js", failingTest)
+    let ws = tree.asWorkspace
+    let tests = jest.projects(ws).get(key: ".").tests(ws)
+    let pass = "src/App.test.jsx"
+    let fail = "src/broken.test.js"
+
+    assert(tests.keys.contains(pass), "missing " + pass + " in " + tests.keys.join(", "))
+    assert(tests.keys.contains(fail), "missing " + fail + " in " + tests.keys.join(", "))
+    assert(tests.get(key: pass).path == pass, "get did not return the file at its key")
+
+    run(tests.subset(keys: [pass]).batch.test(ws))
+    run(tests.get(key: pass).test(ws))
+    assert(failed(tests.get(key: fail).test(ws)), "the failing file passed on its own")
+    assert(failed(tests.subset(keys: [pass, fail]).batch.test(ws)), "a subset with the failing file passed")
+    assert(failed(tests.batch.test(ws)), "the whole run missed the failing file")
+    run(tests.subset(keys: []).batch.test(ws))
+
+    # A failing test in a nested project under src: static discovery gives it
+    # to the nested project, but Jest's own run of the root project finds it.
+    let hidden = project
+      .withNewFile("src/inner/jest.config.js", "module.exports = {}\n")
+      .withNewFile("src/inner/broken.test.js", failingTest)
+      .asWorkspace
+    let rootTests = jest.projects(hidden).get(key: ".").tests(hidden)
+    assert(
+      rootTests.keys.contains("src/inner/broken.test.js") == false,
+      "a nested project's test file was keyed under the root project",
+    )
+    assert(failed(rootTests.batch.test(hidden)), "the whole run did not run the project natively")
+    run(rootTests.subset(keys: rootTests.keys.dropLast(1)).batch.test(hidden))
+
+    null
+  }
+
+  """
+  Settings on the Jest object reach every run: flags are passed to jest, and
+  build runs the package's build script first.
+  """
+  settingsCheck: Void @check {
+    let file = "src/settings.test.js"
+    let ws = project
+      .withNewFile(file, ```js
+        import fs from 'fs'
+        test('selected', () => {})
+        test('unselected', () => { expect(1).toBe(2) })
+        test('built', () => { expect(fs.existsSync('build/index.html')).toBe(true) })
+      ``` + "\n")
+      .asWorkspace
+
+    assert(
+      failed(jest.projects(ws).get(key: ".").tests(ws).get(key: file).test(ws)),
+      "the planted file passed without flags",
+    )
+    run(
+      jest(flags: ["--testNamePattern=^selected$"])
+        .projects(ws)
+        .get(key: ".")
+        .tests(ws)
+        .get(key: file)
+        .test(ws),
+    )
+    run(
+      jest(build: true, flags: ["--testNamePattern=^built$"])
+        .projects(ws)
+        .get(key: ".")
+        .tests(ws)
+        .get(key: file)
+        .test(ws),
+    )
+    assert(
+      failed(
+        jest(flags: ["--testNamePattern=^built$"])
+          .projects(ws)
+          .get(key: ".")
+          .tests(ws)
+          .get(key: file)
+          .test(ws),
+      ),
+      "the build output existed without build",
+    )
 
     null
   }

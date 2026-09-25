@@ -1,85 +1,156 @@
 # Jest Dagger Toolchain
 
+Runs your [Jest](https://jestjs.io) tests in Dagger, one check per project,
+with every test span exported to OpenTelemetry.
+
+## Requirements
+
+Dagger engine `v1.0.0-beta.15` or later. That version is not released yet, so
+for now the module only loads on a dev engine.
+
 ## Installation
 
+```sh
+dagger install github.com/dagger/jest
 ```
-dagger toolchain install github.com/dagger/jest
+
+## Usage
+
+```console
+$ dagger check                                   # every Jest project visible from here
+$ dagger check -l --all                          # one line per project and test file
+$ dagger check --jest --jest-project=web
+$ dagger check --jest --jest-project=web --jest-test-file=src/App.test.jsx
+$ dagger check jest/projects/tests/test --jest-test-file=src/App.test.jsx
+$ dagger check -l --all --jest -f=cli            # each line as flags to reuse
+$ dagger list jest-projects -a
+$ dagger list jest-test-files -a --jest-project=web
 ```
 
-## Functions
+The toolchain has one check, `jest/projects/tests/test`. It runs once per
+selected project, over that project's selected test files:
 
-- `projects`: List the Jest projects visible from the current directory
-- `testAll`: Execute the tests of every visible project (the automatic check)
-- `test`: Execute the tests of a single project
-- `list`: List the tests of a single project
+- With every test file of the project selected, it runs `npx jest` with no
+  file arguments, so Jest's own configuration decides what runs.
+- With some test files filtered out, it runs
+  `npx jest --passWithNoTests --runTestsByPath <files>` over the selected
+  files only.
 
-## Project discovery
+### Selection flags
 
-Discovery is anchored at the directory you run Dagger from, not at the workspace
-root: `dagger check` tests the project you are in and the projects beneath it. A
-project is any directory holding a `jest.config.*` file (`node_modules`
-excluded); a `jest` key in `package.json` also configures Jest, but
+| Flag | Selects |
+| --- | --- |
+| `--jest`, `--by-jest` | checks from this module |
+| `--test`, `--check-test` | checks named `test`, in every installed module |
+| `--jest-project=PATH` | one project, by root relative to the workspace root (repeatable) |
+| `--jest-projects` | every project |
+| `--jest-test-file=PATH` | one test file, by path relative to its project (repeatable) |
+| `--jest-test-files` | every test file |
+
+`dagger check --help` lists the flags in effect. They can change when another
+installed module has a `JestProject` or `JestTestFile` type too.
+
+### Working directory
+
+Discovery starts at the directory you run Dagger from, so you select a project
+by standing in it and need no flag:
+
+```console
+# a monorepo holding web/ and api/, each with a jest.config.js
+$ dagger check                     # runs web and api
+$ cd web/src/components
+$ dagger check                     # runs web only
+$ dagger list jest-projects -a     # -> web
+```
+
+The visible projects are every project at or below the working directory. When
+the working directory is inside a project but is not its root, the nearest
+enclosing project is included too. Keys are relative to the workspace root,
+wherever you stand.
+
+## Discovery
+
+Listing runs no container and no Jest.
+
+**Projects.** A project is a directory holding a `jest.config.*` file (`.js`,
+`.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` or `.json`). `node_modules` is not
+searched. A `jest` key in `package.json` also configures Jest, but
 `package.json` marks every npm package, so it is not a discovery marker.
 
-```bash
-# from the workspace root of a monorepo holding a/ and b/
-dagger call jest projects   # -> a, b
+**Test files.** One search per project matches Jest's default `testMatch`:
+`**/__tests__/**/*.[jt]s?(x)` and `**/?(*.)+(spec|test).[jt]s?(x)`, plus the
+`.mjs`, `.cjs`, `.mts` and `.cts` variants. The search skips:
 
-# from a/
-dagger call jest projects   # -> .
+- `node_modules`;
+- the project's `dist` and `build` directories;
+- the subtrees of nested Jest projects, which report their own files;
+- empty files.
+
+**Limits of static discovery.** The project's Jest configuration is never
+evaluated, so a custom `testMatch`, `testRegex`, `roots` or
+`testPathIgnorePatterns` is not seen:
+
+- A file that the config excludes may still be listed. Selecting only that
+  file runs nothing and passes.
+- A test that only a custom `testMatch` finds is not listed. It still runs
+  whenever the whole project runs, because that run uses Jest's own config.
+- A project with no file matching the default patterns has no test files, so
+  `dagger check` does not run it. Call its `test` function from a module
+  instead (see below).
+- A whole-project run follows Jest's config, so it can also reach a nested
+  project's tests. A filtered run covers only the selected files.
+
+## Settings
+
+Configure the toolchain in your workspace `dagger.toml`:
+
+```toml
+[modules.jest.settings]
+baseImageAddress = "node:22"   # default: node:25-alpine; use any container image
+packageManager = "yarn"        # default: npm; alternatively use yarn, pnpm, or bun
+build = true                   # default: false; run the build script before testing
+useEnv = true                  # default: false; use the project's own Jest environment
+flags = ["--ci"]               # default: []; flags passed to every jest run
 ```
 
-A directory holding no config of its own sits inside its enclosing project, so
-that project is reported as a `..`-relative path and runs too. To run a single
-project, enter it.
+Unless `useEnv` is set, the toolchain injects its register hook through
+`NODE_OPTIONS`, so tests are traced without any change to your config.
 
-## Customization
+## Using it from another module
 
-The toolchain can be customized in your `dagger.json` to meet your needs:
+`projects(ws)` returns a collection. Build its members with `get(key:)`, narrow
+it with `subset(keys:)`, and reach the functions that span the collection
+through `batch`:
 
-```json
-{
-  "name": "my-module",
-  "engineVersion": "...",
-  "toolchains": [
-    {
-      "name": "jest",
-      "source": "github.com/dagger/jest@main",
-      "pin": "...",
-      "customizations": [
-        {
-          "argument": "baseImageAddress",
-          "default": "node:22"       # default: node:25-alpine; use any container image 
-        },
-        {
-          "argument": "packageManager",
-          "default": "yarn"          # default: npm; alternatively use yarn, pnpm, or bun
-        },
-        {
-          "function": ["test"],
-          "argument": "files",
-          "default": ["Test1.js", "Test2.js"]   # default: [] (all); List of files to test
-        },
-        {
-          "function": ["test"],
-          "argument": "build",
-          "default": true   # default: false; Run build before test
-        },
-        {
-          "function": ["test"],
-          "argument": "useEnv",
-          "default": true   # default: false; Use jest-defined environment
-        },
-        {
-          "function": ["test"],
-          "argument": "flags",
-          "default": ["--debug"]   # default: []; Flags to pass to jest
-        }
-      ]
-    }
-  ]
+```dang
+let projects = jest.projects(ws)
+projects.keys                                   # ["api", "web"]
+projects.batch.test(ws)                         # run every project, list the failures
+projects.get(key: "web").test(ws)               # run one whole project
+projects.get(key: "web").list(ws)               # jest --listTests output
+
+let files = projects.get(key: "web").tests(ws)
+files.keys                                      # ["src/App.test.jsx", ...]
+run(files.subset(keys: ["src/App.test.jsx"]).batch.test(ws))
+run(files.get(key: "src/App.test.jsx").test(ws))
+```
+
+`JestProjects.test` and `JestProject.test` are plain functions. They are not
+checks, so that `dagger check` does not run the same tests twice. The test-file
+`test` functions are checks. A check called through a dependency comes back
+unrun, so wrap it in a helper that runs it:
+
+```dang
+let run(check: Check!): Void {
+  if (check.pass == false) {
+    raise check.error.message ?? "check failed"
+  }
+  null
 }
 ```
+
+Settings are constructor arguments:
+`jest(build: true, flags: ["--ci"]).projects(ws)`.
 
 ## Jest OpenTelemetry auto instrumentation
 

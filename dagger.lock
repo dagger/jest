@@ -5,6 +5,7 @@
 ["","git-latest",["github.com/dagger/dang-sdk"],"refs/tags/v1.0.1"]
 ["","git-latest",["github.com/dagger/node",["version","v0.2.0"]],"refs/tags/v0.2.0"]
 ["","git-latest",["github.com/dagger/sdk-helpers",["version","v1"]],"refs/tags/v1.0.4"]
+["","git-sha",["github.com/dagger/dang-sdk","collections"],"95593812a766da77e4fbefac1ce57d67c571a539"]
 ["","git-sha",["github.com/dagger/dang-sdk","refs/tags/v1.0.1"],"6dde4a9ca2cb598bf281ba36778d2428ad53aa48"]
 ["","git-sha",["github.com/dagger/node","refs/tags/v0.2.0"],"3304bf710bba4a75d617dff951a3f728fbc04b07"]
 ["","git-sha",["github.com/dagger/sdk-helpers","refs/tags/v1.0.4"],"6c883f657933ecb06ae86d56d9cd1f8785346bb1"]
