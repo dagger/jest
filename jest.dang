@@ -5,12 +5,12 @@ type Jest {
   """
   The base image to use.
   """
-  pub baseImageAddress: String! = "node:25-alpine"
+  baseImageAddress: String! = "node:25-alpine"
 
   """
   The package manager to use.
   """
-  pub packageManager: String! = "npm"
+  packageManager: String! = "npm"
 
   """
   Filenames that mark a Jest project. A `jest` key in package.json also
@@ -32,7 +32,7 @@ type Jest {
   it, plus the nearest enclosing project when the cwd holds no config of its
   own. Paths are cwd-relative, so a ".." prefix marks an enclosing project.
   """
-  pub projects(ws: Workspace!): [String!]! {
+  projects(ws: Workspace!): [String!]! {
     ws.findRoots(
       markers: configNames,
       exclude: ["**/node_modules/**"],
@@ -44,7 +44,7 @@ type Jest {
   holds no config of its own sits inside its enclosing project, so that project
   runs too; enter a subproject to run it alone.
   """
-  pub testAll(
+  testAll(
     ws: Workspace!,
     """
     Run build before test
@@ -69,7 +69,7 @@ type Jest {
   """
   Execute the tests of a single project
   """
-  pub test(
+  test(
     ws: Workspace!,
     """
     Path of the project to test, relative to the client's cwd
@@ -133,7 +133,7 @@ type Jest {
   """
   List the tests of a single project
   """
-  pub list(
+  list(
     ws: Workspace!,
     """
     Path of the project to list, relative to the client's cwd
@@ -151,7 +151,7 @@ type Jest {
   """
   The source directory of a project, relative to the client's cwd
   """
-  pub source(
+  source(
     ws: Workspace!,
     """
     Path of the project, relative to the client's cwd

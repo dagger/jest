@@ -5,7 +5,7 @@ type E2e {
   """
   The git repository to run tests against as an end-to-end smoke test.
   """
-  pub repo: String! = "https://github.com/kpenfound/demo-react-app"
+  repo: String! = "https://github.com/kpenfound/demo-react-app"
 
   """
   Run the jest toolchain against a real-world repository.
@@ -13,10 +13,10 @@ type E2e {
   This pulls the demo repo, exposes it as a Workspace, and runs the
   jest `testAll` check against it end-to-end.
   """
-  pub testDemoApp: Void @check {
+  testDemoApp: Void @check {
     let ws = git(repo).head.tree.asWorkspace
 
-    jest().testAll(ws)
+    jest.testAll(ws)
   }
 
   """
@@ -36,9 +36,9 @@ type E2e {
       b/jest.config.js
   """
   let siblings: Directory! {
-    directory.
-      withDirectory("a", project).
-      withDirectory("b", project)
+    directory
+      .withDirectory("a", project)
+      .withDirectory("b", project)
   }
 
   """
@@ -49,9 +49,9 @@ type E2e {
       b/jest.config.js
   """
   let nested: Directory! {
-    project.
-      withDirectory("a", project).
-      withDirectory("b", project)
+    project
+      .withDirectory("a", project)
+      .withDirectory("b", project)
   }
 
   """
@@ -70,7 +70,7 @@ type E2e {
   Discovery from `cwd` inside a synthetic workspace built from `tree`.
   """
   let projects(tree: Directory!, cwd: String!): [String!]! {
-    jest().projects(tree.asWorkspace(cwd: cwd))
+    jest.projects(tree.asWorkspace(cwd: cwd))
   }
 
   """
@@ -94,7 +94,7 @@ type E2e {
   From a root holding no config, discovery returns every project beneath it;
   entering one of them scopes discovery to that project alone.
   """
-  pub siblingDiscoveryCheck: Void @check {
+  siblingDiscoveryCheck: Void @check {
     assertPaths(projects(siblings, "."), ["a", "b"], "from the workspace root")
     assertPaths(projects(siblings, "a"), ["."], "from a")
     assertPaths(projects(siblings, "b"), ["."], "from b")
@@ -106,7 +106,7 @@ type E2e {
   A root project does not leak into a nested project's view: the config in the
   cwd shadows the enclosing one, so entering `a` yields `a` alone.
   """
-  pub nestedDiscoveryCheck: Void @check {
+  nestedDiscoveryCheck: Void @check {
     assertPaths(projects(nested, "."), [".", "a", "b"], "from the workspace root")
     assertPaths(projects(nested, "a"), ["."], "from a")
     assertPaths(projects(nested, "b"), ["."], "from b")
@@ -119,10 +119,10 @@ type E2e {
   reported as a ".."-relative path alongside the projects below the cwd, and
   that path resolves back to the enclosing project through the workspace.
   """
-  pub ancestorDiscoveryCheck: Void @check {
+  ancestorDiscoveryCheck: Void @check {
     let ws = ancestor.asWorkspace(cwd: "work")
 
-    assertPaths(jest().projects(ws), ["..", "app"], "from work")
+    assertPaths(jest.projects(ws), ["..", "app"], "from work")
 
     if (ws.directory("..").glob("jest.config.js").length != 1) {
       raise "the returned ancestor path did not resolve back to the enclosing project"
@@ -141,19 +141,17 @@ type E2e {
   Whether `testAll` from `cwd` observed the failure planted in `tree`.
   """
   let testAllFailed(tree: Directory!, cwd: String!): Boolean! {
-    try {
-      jest().testAll(tree.asWorkspace(cwd: cwd))
+    {
+      jest.testAll(tree.asWorkspace(cwd: cwd))
       false
-    } catch {
-      err => true
-    }
+    } rescue true
   }
 
   """
   `testAll` runs every project below the cwd, and entering one of them leaves
   its siblings out of reach.
   """
-  pub descendantScopeCheck: Void @check {
+  descendantScopeCheck: Void @check {
     let broken = siblings.withNewFile("b/src/broken.test.js", failingTest)
 
     if (testAllFailed(broken, ".") == false) {
@@ -162,7 +160,10 @@ type E2e {
     if (testAllFailed(broken, "a")) {
       raise "testAll from a should not have run the sibling project b"
     }
-    if (testAllFailed(siblings.withNewFile("a/src/broken.test.js", failingTest), "a") == false) {
+    if (testAllFailed(
+      siblings.withNewFile("a/src/broken.test.js", failingTest),
+      "a",
+    ) == false) {
       raise "testAll from a should have run a's own tests"
     }
 
@@ -173,7 +174,7 @@ type E2e {
   A cwd holding no config sits inside its enclosing project, so `testAll` runs
   that project too rather than only the ones below the cwd.
   """
-  pub ancestorScopeCheck: Void @check {
+  ancestorScopeCheck: Void @check {
     if (testAllFailed(ancestor.withNewFile("src/broken.test.js", failingTest), "work") == false) {
       raise "testAll from work should have run the enclosing project"
     }
