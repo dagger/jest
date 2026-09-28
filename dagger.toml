@@ -2,3 +2,18 @@
 source = ".dagger/modules/e2e"
 # The git repository to run tests against as an end-to-end smoke test.
 # settings.repo = ""
+
+[modules.dagger-dang-sdk]
+source = "github.com/dagger/dang-sdk"
+
+[sdks.dang]
+module = "dagger-dang-sdk"
+
+[sdks.dang.scopes."."]
+clients = ["github.com/dagger/node"]
+is-module = true
+name = "jest"
+
+[sdks.dang.scopes.".dagger/modules/e2e"]
+clients = ["./."]
+is-module = true
