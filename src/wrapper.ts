@@ -56,6 +56,54 @@ function __logEndpoint(endpoint?: string): string | undefined {
   return logEndpoint !== endpoint ? logEndpoint : undefined;
 }
 
+/**
+ * One OpenTelemetry SDK per process. Jest builds an environment per test
+ * file, in the same worker process; the SDK registers global providers, which
+ * can only be registered once, so starting and shutting one down per file
+ * left every file after the first exporting through a provider that was
+ * already shut down. Instead the SDK starts once, each file flushes what it
+ * recorded when it finishes, and the process shuts the SDK down on its way
+ * out.
+ */
+let __otelSDK: OtelSDK | undefined;
+
+function __startOtelSDK(): void {
+  if (__otelSDK) {
+    return;
+  }
+  __otelSDK = new OtelSDK();
+  __otelSDK.start();
+  process.once("beforeExit", () => {
+    void __otelSDK?.shutdown();
+  });
+}
+
+async function __forceFlush(provider: any): Promise<void> {
+  const target = provider?.getDelegate?.() ?? provider?._getDelegate?.() ?? provider;
+  if (target && typeof target.forceFlush === "function") {
+    await target.forceFlush();
+  }
+}
+
+async function __flushOtel(): Promise<void> {
+  await Promise.all([
+    __forceFlush(trace.getTracerProvider()),
+    __forceFlush(logs.getLoggerProvider()),
+  ]);
+}
+
+/**
+ * Wrap a test function so its body runs inside the test span, keeping its
+ * arity: Jest passes a `done` callback only to functions that declare one.
+ */
+export function wrapTestFn(original: (...args: any[]) => any, ctx: Context): any {
+  const wrapped = function wrappedTestFn(this: unknown, ...args: unknown[]) {
+    return context.with(ctx, () => original.apply(this, args));
+  };
+  Object.defineProperty(wrapped, "length", { value: original.length });
+  return wrapped;
+}
+
 function __tracer() {
   return trace.getTracer("dagger.io/jest");
 }
@@ -140,8 +188,6 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
 
     _originalFnByTest = new WeakMap<Circus.TestEntry, Circus.TestFn>();
 
-    _otelSDK = new OtelSDK();
-
     /////
     // TestEnvironment override
     /////
@@ -163,7 +209,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     async setup(): Promise<void> {
       await super.setup();
 
-      this._otelSDK.start();
+      __startOtelSDK();
 
       // Bridge the OpenTelemetry API singleton into the Jest VM realm
       const apiKey = Symbol.for("opentelemetry.js.api.1");
@@ -214,12 +260,8 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
 
           const original = this._originalFnByTest.get(event.test);
 
-          event.test.fn = function wrappedTestFn() {
-            // Activate test span for the duration of the test body
-            return context.with(trace.setSpan(ctx, testSpan), () => {
-              return (original as any).apply(this, arguments);
-            });
-          };
+          // Activate the test span for the duration of the test body.
+          event.test.fn = wrapTestFn(original as any, trace.setSpan(ctx, testSpan));
         }
       }
 
@@ -262,6 +304,22 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
         if (original) {
           event.test.fn = original;
 
+          this._originalFnByTest.delete(event.test);
+        }
+      }
+
+      // A skipped or todo test gets test_start but never test_done: end its
+      // span here, or it would stay running forever.
+      if (event.name === "test_skip" || event.name === "test_todo") {
+        const span = this._testSpanByTest.get(event.test);
+        if (span) {
+          span.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, event.name === "test_skip" ? "skipped" : "todo");
+          span.end();
+          this._testSpanByTest.delete(event.test);
+        }
+        const original = this._originalFnByTest.get(event.test);
+        if (original) {
+          event.test.fn = original;
           this._originalFnByTest.delete(event.test);
         }
       }
@@ -313,7 +371,7 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
     }
 
     /**
-     * Flush and shutdown the otel SDK on eading.
+     * End the file's span and flush what this file recorded.
      */
     async teardown(): Promise<void> {
       try {
@@ -333,11 +391,11 @@ export function wrapEnvironmentClass(BaseEnv: typeof TestEnvironment): any {
         }
         this.__topLevelSpan?.end();
 
-        await this._otelSDK.shutdown();
+        await __flushOtel();
       } catch {
-        console.warn("warning: failed to shutdown OTEL");
+        console.warn("warning: failed to flush OTEL");
       } finally {
-        super.teardown();
+        await super.teardown();
       }
     }
 

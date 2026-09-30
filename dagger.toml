@@ -4,13 +4,12 @@ source = ".dagger/modules/e2e"
 # settings.repo = ""
 
 [modules.dagger-dang-sdk]
-source = "github.com/dagger/dang-sdk"
+source = "github.com/dagger/dang-sdk@collections"
 
 [sdks.dang]
 module = "dagger-dang-sdk"
 
 [sdks.dang.scopes."."]
-clients = ["github.com/dagger/node"]
 is-module = true
 name = "jest"
 

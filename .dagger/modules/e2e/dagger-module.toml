@@ -1,5 +1,5 @@
 name = "e2e"
-engineVersion = "v1.0.0-beta.14"
+engineVersion = "v1.0.0-beta.15"
 
 [runtime]
   source = "dang"
