@@ -714,4 +714,23 @@ type E2e {
     assert(result == "passed", "a workspace package's bin was not linked: " + result)
     null
   }
+
+  """
+  With build set, a package without a build script has nothing to build and
+  still runs its tests, while a failing build script names the build step.
+  """
+  buildScriptCheck: Void @check {
+    let test = fixture(
+      directory.withNewFile("a.test.js", "test('a', () => {})\n"),
+    )
+    let noScript = outcome(test, jest(build: true))
+    assert(noScript == "passed", "a package without a build script failed to build: " + noScript)
+    let failing = test.withNewFile(
+      "package.json",
+      "{\"name\": \"fixture\", \"private\": true, \"scripts\": {\"build\": \"exit 4\"}, \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+    )
+    let broken = outcome(failing, jest(build: true))
+    assert(broken.contains("build failed (npm run build, exit 4)"), "a failing build was not named: " + broken)
+    null
+  }
 }

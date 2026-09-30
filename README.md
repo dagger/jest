@@ -186,7 +186,12 @@ The install root, or the project itself, is mounted at `/src` without
 `node_modules` and without files ignored by `.gitignore`.
 
 With `build` set, the package manager's `run build` runs in the project
-before the tests.
+before the tests, when the nearest `package.json` at or above the project has
+a `build` script; a package without one just runs its tests. The build runs
+only in the selected project: running `packages/app` alone does not build the
+workspace packages it depends on, so give it a `build` script that builds
+them first, or run from the workspace root, whose own `build` script usually
+builds every package.
 
 ## Settings
 

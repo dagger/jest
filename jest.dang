@@ -848,7 +848,7 @@ type JestProject {
       failure
     } else {
       let ctr = runner(ws)
-      let built = if (tool.build) {
+      let built = if (tool.build and hasBuildScript(ws)) {
         ctr.withExec([packageManager(ws), "run", "build"], expect: ReturnType.ANY)
       } else {
         ctr
@@ -869,6 +869,19 @@ type JestProject {
           "jest failed (exit " + toString(code) + ")" + output(ran)
         }
       }
+    }
+  }
+
+  """
+  Whether the package.json the build runs from, the nearest at or above this
+  project, has a "build" script. A package without one has nothing to build.
+  """
+  let hasBuildScript(ws: Workspace!): Boolean! {
+    let found = ws.findUp("package.json", rootPath)
+    if (found == null) {
+      false
+    } else {
+      ws.file(found ?? "").contents.containsMatch(`"scripts"\s*:\s*\{[^}]*"build"\s*:`)
     }
   }
 
