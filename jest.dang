@@ -1,3 +1,313 @@
+# Static reading of jest.config: only literal values are honoured, and
+# nothing here runs a container or Node. Offsets are byte offsets, so the
+# source is made ASCII first. The scanning helpers are shared with the
+# Playwright module.
+
+# A JS string literal: single, double, or backtick without interpolation.
+let stringLiteral = `'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|` + "`" + `(?:[^` + "`" + `$\\]|\\[\s\S])*` + "`"
+
+# A JS regex literal body and flags.
+let regexLiteral = `/(?:[^/\\\n\[*]|\\.|\[(?:[^\]\\\n]|\\.)*\])(?:[^/\\\n\[]|\\.|\[(?:[^\]\\\n]|\\.)*\])*/[a-z]*`
+
+# One literal pattern: a string (a glob) or a regex literal.
+let patternLiteral = stringLiteral + "|" + regexLiteral
+
+# Comments, strings and regex literals: everything whose brackets and commas
+# are not code. A regex literal is recognized only after a character that can
+# precede an expression, captured so masking keeps it.
+let tokenPattern = `//[^\n]*|/\*[\s\S]*?\*/|` + stringLiteral + `|([:\[,(=!&|?]\s*)` + regexLiteral
+
+# A run of n filler characters.
+let fill(n: Int!, char: String!): String! {
+  "".padRight(n).replace(" ", char)
+}
+
+# Byte length of an ASCII string.
+let size(s: String!): Int! { s.split("").length }
+
+# The bytes of s in [start, end); s must be ASCII.
+let slice(s: String!, start: Int!, end: Int!): String! {
+  s.truncate(end).trimPrefix(s.truncate(start))
+}
+
+# Replace comments, strings and regex literals with filler of the same length,
+# so offsets line up with the source while their brackets and commas vanish.
+let mask(source: String!): String! {
+  source.rewriteMatches(Regexp(tokenPattern)) { m =>
+    let lead = m.captures[0] ?? ""
+    # Comments read as whitespace; literals as an opaque word.
+    let char = if (m.string.hasPrefix("/")) { " " } else { "_" }
+    lead + fill(m.end - m.start - size(lead), char)
+  }
+}
+
+# Replace every innermost bracketed group with filler of the same length,
+# keeping a marker for its opening bracket: "~" for {, "^" for [, "%" for (.
+let flattenOnce(masked: String!): String! {
+  masked.rewriteMatches(`[{\[(][^{}\[\]()]*[}\])]`) { m =>
+    let open = if (m.string.hasPrefix("{")) { "~" } else if (m.string.hasPrefix("[")) { "^" } else { "%" }
+    open + fill(m.end - m.start - 1, "_")
+  }
+}
+
+# The group opening at offset start, once everything nested in it has been
+# flattened: its own top level is then plain text. Null when there is none.
+let groupAt(masked: String!, start: Int!): String {
+  let hits = masked.matchAll(`[{\[(][^{}\[\]()]*[}\])]`).filter { m => m.start == start }
+  let hit = hits[0]
+  if (hit != null) {
+    return hit.string
+  }
+  let next = flattenOnce(masked)
+  if (next == masked) {
+    return null
+  }
+  groupAt(next, start)
+}
+
+# A string literal's value, or null when text is anything else.
+let stringValue(text: String!): String {
+  let m = text.trimSpace.match(Regexp(`^(?:'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|` + "`" + `([^` + "`" + `$\\]*)` + "`" + `)$`))
+  if (m == null) {
+    return null
+  }
+  m.captures.join("").replaceMatches(`\\(.)`, "$1")
+}
+
+# A glob in micromatch syntax as a regexp over absolute paths, as Jest matches
+# testMatch and projects. Null for syntax this does not translate (!(...)).
+let globRegex(glob: String!): String {
+  let tokens = glob.matchAll(
+    `\*\*/|\*\*|[@?+*!]\(|[{}()|,*?/]|\[(?:\\.|[^\]\\])+\]|\\.|[^*?\[\]{}()|,@+!\\/]+|[\s\S]`,
+  ).map { m => m.string }
+  let empty: [String!]! = []
+  let state = tokens.reduce({{out: "", stack: empty, bad: false}}) { st, tok =>
+    let top = st.stack.takeLast(1)[0] ?? ""
+    let inBrace = top == "{"
+    let inExt = top != "" and top != "{"
+    if (tok == "**/") {
+      {{out: st.out + "(?:.*/)?", stack: st.stack, bad: st.bad}}
+    } else if (tok == "**") {
+      {{out: st.out + ".*", stack: st.stack, bad: st.bad}}
+    } else if (tok == "*") {
+      {{out: st.out + "[^/]*", stack: st.stack, bad: st.bad}}
+    } else if (tok == "?") {
+      {{out: st.out + "[^/]", stack: st.stack, bad: st.bad}}
+    } else if (tok == "!(") {
+      {{out: st.out, stack: st.stack, bad: true}}
+    } else if (tok == "@(" or tok == "?(" or tok == "+(" or tok == "*(") {
+      {{
+        out: st.out + "(?:",
+        stack: st.stack + [tok.trimSuffix("(")],
+        bad: st.bad
+      }}
+    } else if (tok == "{") {
+      {{out: st.out + "(?:", stack: st.stack + ["{"], bad: st.bad}}
+    } else if (tok == "}" and inBrace) {
+      {{out: st.out + ")", stack: st.stack.dropLast(1), bad: st.bad}}
+    } else if (tok == "," and inBrace) {
+      {{out: st.out + "|", stack: st.stack, bad: st.bad}}
+    } else if (tok == "|" and inExt) {
+      {{out: st.out + "|", stack: st.stack, bad: st.bad}}
+    } else if (tok == ")" and inExt) {
+      let suffix = if (top == "@") { "" } else { top }
+      {{out: st.out + ")" + suffix, stack: st.stack.dropLast(1), bad: st.bad}}
+    } else if (tok.hasPrefix("[") and tok.hasSuffix("]") and size(tok) > 2) {
+      let body = tok.trimPrefix("[").trimSuffix("]")
+      let negated = if (body.hasPrefix("!")) { "^" + body.trimPrefix("!") } else { body }
+      {{out: st.out + "[" + negated + "]", stack: st.stack, bad: st.bad}}
+    } else if (tok.hasPrefix("\\") and size(tok) == 2) {
+      {{
+        out: st.out + Regexp.escape(tok.trimPrefix("\\")),
+        stack: st.stack,
+        bad: st.bad
+      }}
+    } else {
+      {{out: st.out + Regexp.escape(tok), stack: st.stack, bad: st.bad}}
+    }
+  }
+  if (state.bad or state.stack.length > 0) {
+    return null
+  }
+  let pattern = "^" + state.out + "$"
+  let ok = { Regexp(pattern); true } rescue {
+    err: Error => false
+  }
+  if (ok) { pattern } else { null }
+}
+
+# The source with non-ASCII characters replaced, so byte offsets and
+# character offsets agree, and quoted keys ("testMatch": in JSON) unquoted
+# in place, so they read like JS keys.
+let prepare(source: String!): String! {
+  source.replaceMatches(`[^\x00-\x7F]`, with: "?").rewriteMatches(`["'](\w+)["']\s*:`) { m =>
+    m.string.replaceMatches(`["']`, with: " ")
+  }
+}
+
+# The offset of the object a config file exports, or -1: module.exports or
+# export default of an object literal, of a const holding one, or a JSON
+# object.
+let configObject(source: String!, masked: String!): Int! {
+  let direct = masked.match(`(?:export\s+default\s+|module\.exports\s*=\s*)\{`)
+  if (direct != null) {
+    return direct.end - 1
+  }
+  let named = masked.match(`(?:export\s+default\s+|module\.exports\s*=\s*)(\w+)\s*;?\s*(?:$|\n)`)
+  if (named != null) {
+    let local = masked.match(
+      Regexp(`(?:const|let|var)\s+` + (named.captures[0] ?? "") + `\s*(?::[^=;]*)?=\s*\{`),
+    )
+    if (local != null) {
+      return local.end - 1
+    }
+  }
+  let json = masked.match(`^\s*\{`)
+  if (json != null) { json.end - 1 } else { -1 }
+}
+
+# The source text of a key's value at the top level of the object at start.
+# Null when the key is absent; "" for a shorthand key, which is a variable.
+let valueText(source: String!, masked: String!, start: Int!, name: String!): String {
+  let body = groupAt(masked, start) ?? ""
+  if (body.containsMatch(Regexp(`[{,]\s*` + name + `\s*[,}]`))) {
+    return ""
+  }
+  let hit = body.matchAll(Regexp(`[{,]\s*` + name + `\s*:`)).takeLast(1)[0]
+  if (hit == null) {
+    return null
+  }
+  let value = slice(body, hit.end, size(body)).match(`^[^,}]*`)
+  slice(source, start + hit.end, start + hit.end + (if (value == null) { 0 } else { value.end }))
+}
+
+# A string literal or an array of them, as values. Null for anything else.
+let stringsValue(text: String!): [String!] {
+  let trimmed = text.trimSpace
+  let empty: [String!]! = []
+  let items = if (trimmed.hasPrefix("[") and trimmed.hasSuffix("]")) {
+    let inner = trimmed.trimPrefix("[").trimSuffix("]")
+    let element = Regexp(`\s*(?:` + stringLiteral + `)\s*(?:,|$)`)
+    if (inner.replaceMatches(element, with: "").trimSpace != "") {
+      return null
+    }
+    inner.matchAll(element).map { m => m.string.trimSpace.trimSuffix(",").trimSpace }
+  } else if (trimmed == "") {
+    return null
+  } else {
+    [trimmed]
+  }
+  let values = items.map { item => stringValue(item) ?? "<not a literal>" }
+  if (values.contains("<not a literal>")) { null } else { values }
+}
+
+# An absolute path with "." and ".." segments collapsed.
+let normalize(p: String!): String! {
+  let empty: [String!]! = []
+  let segments = p.split("/").filter { s => s != "" and s != "." }.reduce(empty) { acc, s =>
+    if (s == "..") { acc.dropLast(1) } else { acc + [s] }
+  }
+  "/" + segments.join("/")
+}
+
+# p resolved against the absolute directory dir.
+let resolveIn(dir: String!, p: String!): String! {
+  if (p.hasPrefix("/")) { normalize(p) } else { normalize(dir + "/" + p) }
+}
+
+# Whether a regexp compiles.
+let compiles(pattern: String!): Boolean! {
+  { Regexp(pattern); true } rescue {
+    err: Error => false
+  }
+}
+
+# Jest's default testMatch, as regexps.
+let defaultTests: [String!]! = [
+  globRegex("**/__tests__/**/*.?([mc])[jt]s?(x)") ?? "",
+  globRegex("**/?(*.)+(spec|test).?([mc])[jt]s?(x)") ?? "",
+]
+
+# What a Jest config says about which files are tests, read statically, with
+# paths absolute in the container:
+#   tests    - regexps a test file matches (testRegex, else testMatch)
+#   ignore   - testPathIgnorePatterns regexps
+#   roots    - directories tests are found under
+#   projects - regexps for the paths its `projects` entries name, when they
+#              are all string literals
+#   custom   - whether tests differ from Jest's default testMatch
+# A value that is not a literal takes Jest's default.
+let configRules(text: String!, dir: String!): {{tests: [String!]!, ignore: [String!]!, roots: [String!]!, projects: [String!]!, custom: Boolean!}}! {
+  let source = prepare(text)
+  let masked = mask(source)
+  let start = configObject(source, masked)
+  let read(name: String!): [String!] {
+    if (start < 0) {
+      return null
+    }
+    let value = valueText(source, masked, start, name)
+    if (value == null) { null } else { stringsValue(value ?? "") }
+  }
+  let rootDirValue = read("rootDir")
+  let rootDir = if (rootDirValue == null) { dir } else { resolveIn(dir, (rootDirValue ?? ["."])[0] ?? ".") }
+  let expand(s: String!): String! { s.replace("<rootDir>", rootDir) }
+  let empty: [String!]! = []
+  let regexValue = (read("testRegex") ?? empty).map { re => expand(re) }.filter { re => compiles(re) }
+  # A glob starting with ** matches wherever it is resolved from.
+  let matchValueRaw = (read("testMatch") ?? empty).map { glob =>
+    if (glob.hasPrefix("**")) { globRegex(expand(glob)) ?? "" } else {
+      globRegex(resolveIn(
+        rootDir,
+        expand(glob),
+      )) ?? ""
+    }
+  }.filter { re => re != "" }
+  let tests = if (regexValue.length > 0) {
+    regexValue
+  } else if (matchValueRaw.length > 0) {
+    matchValueRaw
+  } else {
+    defaultTests
+  }
+  let ignoreValue = read("testPathIgnorePatterns")
+  let rootsValue = read("roots")
+  let projectsValue = read("projects")
+  {{
+    tests,
+    ignore: if (ignoreValue == null) { ["/node_modules/"] } else {
+      (ignoreValue ?? empty).map { re => expand(re) }.filter { re => compiles(re) }
+    },
+
+    roots: if (rootsValue == null) { [rootDir] } else {
+      (rootsValue ?? empty).map { root => resolveIn(rootDir, expand(root)) }
+    },
+
+    projects: if (projectsValue == null) {
+      empty
+    } else {
+      (projectsValue ?? empty).map { glob => globRegex(resolveIn(rootDir, expand(glob))) ?? "" }.filter { re => re != "" }
+    },
+
+    custom: tests != defaultTests
+  }}
+}
+
+# Whether a Jest config's rules make the absolute path a test.
+let isTest(
+  rules: {{tests: [String!]!, ignore: [String!]!, roots: [String!]!, projects: [String!]!, custom: Boolean!}}!,
+  file: String!,
+): Boolean! {
+  rules.roots.any { root => file.hasPrefix(root.trimSuffix("/") + "/") }
+    and rules.tests.any { re => file.containsMatch(Regexp(re)) }
+    and rules.ignore.any { re => file.containsMatch(Regexp(re)) } == false
+}
+
+# Whether a basename is a Jest config file: jest.config.js, or a named variant
+# such as jest.config-eslint-7.js that a `projects` entry points at.
+let isConfigName(name: String!): Boolean! {
+  name.containsMatch(`^jest\.config(?:[.-][^/]*)?\.(?:[mc]?[jt]s|json)$`)
+}
+
 """
 Toolchain to execute Jest tests
 """
@@ -8,9 +318,10 @@ type Jest {
   baseImageAddress: String! = "node:25-alpine"
 
   """
-  The package manager to use.
+  Package manager to install with (npm, pnpm, yarn or bun). Empty detects it
+  from package.json's "packageManager" field or the lockfile.
   """
-  packageManager: String! = "npm"
+  packageManager: String! = ""
 
   """
   Run the package's build script before testing.
@@ -27,6 +338,16 @@ type Jest {
   Extra flags passed to every jest run.
   """
   flags: [String!]! = []
+
+  """
+  Extra flags appended to the install command, e.g. ["--ignore-scripts"].
+  """
+  installFlags: [String!]! = []
+
+  """
+  Environment variables for the build and test steps, as KEY=VALUE.
+  """
+  environment: [String!]! = []
 
   """
   Filenames that mark a Jest project. A `jest` key in package.json also
@@ -48,7 +369,59 @@ type Jest {
   keyed by project root.
   """
   projects(ws: Workspace!): JestProjects! {
-    JestProjects(paths: projectRoots(ws, "."), tool: self)
+    JestProjects(paths: projectKeys(ws), tool: self)
+  }
+
+  """
+  Project roots visible from the working directory, less the ones an
+  enclosing project already runs through a literal `projects` list in its
+  config: running both would run those tests twice.
+  """
+  let projectKeys(ws: Workspace!): [String!]! {
+    let roots = projectRoots(ws, ".")
+    let tops = roots.filter { root =>
+      roots.any { other => other != root and (other == "." or root.hasPrefix(other + "/")) } == false
+    }
+    let empty: [String!]! = []
+    # One search finds the configs that mention projects at all.
+    let configs = if (tops.length == 0) {
+      empty
+    } else {
+      ws
+        .search(
+          paths: tops.map { root => absolutePath(root) },
+          globs: configNames + ["!node_modules", "!.git"],
+          pattern: "projects",
+          filesOnly: true,
+        ).{{filePath}}
+        .map { hit => hit.filePath.trimPrefix("/").trimPrefix("./") }
+        .uniq
+    }
+    let parents = configs
+      .filter { file => roots.contains(parentOf(file)) }
+      .map { file =>
+        {{
+          dir: parentOf(file),
+          projects: configRules(ws.file("/" + file).contents, containerPath(parentOf(file))).projects
+        }}
+      }
+      .filter { parent => parent.projects.length > 0 }
+    roots.filter { root =>
+      parents.any { parent =>
+        parent.dir != root
+          and (parent.dir == "." or root.hasPrefix(parent.dir + "/"))
+          and coveredBy(parent.projects, root)
+      } == false
+    }
+  }
+
+  """
+  Whether a `projects` list names the project rooted at dir, by its directory
+  or by one of its config files.
+  """
+  let coveredBy(projects: [String!]!, dir: String!): Boolean! {
+    let paths = [containerPath(dir)] + configNames.map { name => containerPath(dir) + "/" + name }
+    projects.any { re => paths.any { p => p.containsMatch(Regexp(re)) } }
   }
 
   """
@@ -87,6 +460,170 @@ type Jest {
       acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
     }
   }
+
+  """
+  A workspace-root-relative path as an absolute one, as Jest sees paths when
+  it matches its config's patterns; static config reading matches with it.
+  """
+  let containerPath(p: String!): String! {
+    if (p == ".") { "/src" } else { "/src/" + p }
+  }
+
+  """
+  A workspace-root-relative path as an absolute workspace path.
+  """
+  let absolutePath(p: String!): String! {
+    if (p == ".") { "/" } else { "/" + p }
+  }
+
+  """
+  The parent of a workspace-root-relative directory.
+  """
+  let parentOf(p: String!): String! {
+    let up = p.split("/").dropLast(1).join("/")
+    if (up == "") { "." } else { up }
+  }
+
+  """
+  The workspace-root-relative directory of an absolute path findUp returned,
+  or null.
+  """
+  let dirOf(found: String): String {
+    if (found == null) {
+      null
+    } else {
+      let dir = (found ?? "").trimPrefix("/").split("/").dropLast(1).join("/")
+      if (dir == "") { "." } else { dir }
+    }
+  }
+
+  """
+  A workspace path as findUp or search return it, made root-relative.
+  """
+  let normalizePath(p: String!): String! {
+    let trimmed = p.trimPrefix("/").trimPrefix("./").trimSuffix("/")
+    if (trimmed == "") { "." } else { trimmed }
+  }
+
+  """
+  A relative path spec resolved against dir, both relative to the same root;
+  "<outside>" when it leaves the root.
+  """
+  let joinRelative(dir: String!, spec: String!): String! {
+    let empty: [String!]! = []
+    let start = if (dir == ".") { empty } else { dir.split("/") }
+    let resolved = spec.split("/").filter { s => s != "" and s != "." }.reduce({{
+      parts: start,
+      out: false
+    }}) { st, s =>
+      if (s == "..") {
+        if (st.parts.length == 0) {
+          {{parts: st.parts, out: true}}
+        } else {
+          {{parts: st.parts.dropLast(1), out: st.out}}
+        }
+      } else {
+        {{parts: st.parts + [s], out: st.out}}
+      }
+    }
+    if (resolved.out or spec.hasPrefix("/")) {
+      "<outside>"
+    } else if (resolved.parts.length == 0) {
+      "."
+    } else {
+      resolved.parts.join("/")
+    }
+  }
+
+  """
+  name inside dir, both workspace-root-relative.
+  """
+  let join(dir: String!, name: String!): String! {
+    if (dir == ".") { name } else { dir + "/" + name }
+  }
+
+  """
+  The deepest of some directories, or null when there are none.
+  """
+  let nearest(dirs: [String]!): String {
+    let none: String = null
+    let depth(dir: String!): Int! {
+      if (dir == ".") { 0 } else { dir.split("/").length }
+    }
+    dirs.reduce(none) { best, dir =>
+      if (dir == null) {
+        best
+      } else if (best == null) {
+        dir
+      } else if (depth(dir ?? ".") > depth(best ?? ".")) {
+        dir
+      } else {
+        best
+      }
+    }
+  }
+
+  """
+  p relative to base, which is p or one of its parents.
+  """
+  let relativeTo(base: String!, p: String!): String! {
+    if (base == p) { "." } else if (base == ".") { p } else {
+      p.trimPrefix(base + "/")
+    }
+  }
+
+  """
+  Node container with every package manager's cache on a volume, corepack
+  enabled for pnpm and yarn, and browser downloads and git hooks switched off:
+  Jest needs none of them.
+  """
+  let nodeBase(pm: String!): Container! {
+    let base = container
+      .from(baseImageAddress)
+      .withMountedCache("/root/.npm", cacheVolume("npm-cache"))
+      .withEnvVariable("npm_config_cache", "/root/.npm")
+      # Yarn 1's cache breaks under concurrent installs, so they take turns.
+      .withMountedCache("/root/.yarn-cache", cacheVolume("yarn-cache"), sharing: CacheSharingMode.LOCKED)
+      .withEnvVariable("YARN_CACHE_FOLDER", "/root/.yarn-cache")
+      .withMountedCache("/root/.bun-cache", cacheVolume("bun-cache"))
+      .withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.bun-cache")
+      .withMountedCache("/root/.corepack", cacheVolume("corepack"))
+      .withEnvVariable("COREPACK_HOME", "/root/.corepack")
+      .withEnvVariable("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+      .withEnvVariable("CI", "true")
+      .withEnvVariable("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+      .withEnvVariable("PUPPETEER_SKIP_DOWNLOAD", "1")
+      .withEnvVariable("CYPRESS_INSTALL_BINARY", "0")
+      .withEnvVariable("HUSKY", "0")
+      .withEnvVariable("SKIP_INSTALL_SIMPLE_GIT_HOOKS", "1")
+    if (pm == "pnpm" or pm == "yarn") {
+      # Images from node 25 on no longer ship corepack, and --force replaces
+      # the yarn they still ship.
+      let ctr = if (pm == "pnpm") {
+        # pnpm 12 ignores npm_config_store_dir, and npm warns about it, so
+        # the store is also passed on the install command line.
+        base
+          .withMountedCache("/root/.pnpm-store", cacheVolume("pnpm-store"))
+          .withEnvVariable("pnpm_config_store_dir", "/root/.pnpm-store")
+      } else {
+        base
+      }
+      ctr.withExec([
+        "sh",
+        "-c",
+        "command -v corepack >/dev/null 2>&1 || npm install -g --force corepack; corepack enable",
+      ])
+    } else if (pm == "bun") {
+      base.withExec(["sh", "-c", "command -v bun >/dev/null 2>&1 || npm install -g bun"])
+    } else {
+      base
+    }
+  }
+
+  """
+  Where the Dagger Jest library is mounted.
+  """
+  let libraryPath: String! = "/opt/dagger-jest"
 
   """
   Build the otel library
@@ -136,7 +673,7 @@ type JestProjects @collection {
     let failures = paths.map { p => project(p) }.{{path, failure: testFailure(ws)}}
       .filter { result => result.failure != null }
     if (failures.length > 0) {
-      raise "Jest tests failed:\n" + failures.map { result =>
+      raise "Jest failed in " + toString(failures.length) + " project(s):\n" + failures.map { result =>
         "- " + result.path + ": " + (result.failure ?? "")
       }.join("\n")
     }
@@ -172,46 +709,97 @@ type JestProject {
     JestTestFiles(files: testFiles(ws), project: self)
   }
 
-  # Test files are found with one ripgrep search over the project for Jest's
-  # default testMatch rather than asking jest --listTests, so listing tests
-  # runs no container. node_modules is pruned by the search itself. The same
-  # search finds the config files of nested projects, whose subtrees belong to
-  # them. A project's own config is not evaluated: a custom testMatch, roots or
-  # testPathIgnorePatterns is not seen. The dist and build directories left
-  # out of the source are skipped too.
+  # Test files are found with one ripgrep search over the project rather than
+  # by asking jest --listTests, so listing tests runs no container.
+  # node_modules is pruned by the search itself. The same search finds the
+  # configs of nested projects: a nested project's files are its own, unless
+  # this project's config names it in a literal `projects` list, in which case
+  # they are keyed here and filtered by that project's config. Configs are read
+  # statically: literal testMatch, testRegex, testPathIgnorePatterns, roots and
+  # rootDir are honoured; anything else takes Jest's default.
   let testFiles(ws: Workspace!): [String!]! {
     let prefix = if (path == ".") { "" } else { path + "/" }
-    let found = ws
-      .search(
-        paths: [rootPath],
-        globs: [
-          "**/__tests__/**",
-          "*test.*",
-          "*spec.*",
-          "jest.config.*",
-          "!node_modules",
-          "!.git",
-        ],
-        pattern: "",
-        filesOnly: true,
-      ).{{filePath}}
-      .map { match => match.filePath.trimPrefix("/").trimPrefix("./").trimPrefix(prefix) }
-      .filter { file => file.containsMatch(`(^|/)node_modules/`) == false }
-    let nested = found
-      .filter { file =>
-        tool.configNames.any { name => file.hasSuffix("/" + name) }
+    let base = tool.containerPath(path)
+    let narrow = found(ws, ["**/__tests__/**", "*test.*", "*spec.*"])
+    let configs = narrow.filter { file => isConfigName(file.split("/").takeLast(1)[0] ?? "") }
+    let ownName = configs.filter { file => tool.configNames.contains(file) }[0]
+    let own = configRules(
+      if (ownName == null) { "" } else {
+        ws.file(
+          tool.absolutePath(prefix + (ownName ?? "")),
+        ).contents
+      },
+      base,
+    )
+    let below = configs.filter { file => file.contains("/") }
+    let dirOf(file: String!): String! { file.split("/").dropLast(1).join("/") }
+    let covered = below.filter { file =>
+      own.projects.any { re =>
+        (base + "/" + file).containsMatch(Regexp(re)) or (base + "/" + dirOf(file)).containsMatch(Regexp(re))
       }
-      .map { file => file.split("/").dropLast(1).join("/") + "/" }
+    }
+    let scopes = covered.map { file => dirOf(file) }.uniq.map { dir =>
+      {{
+        dir,
+        rules: covered.filter { file => dirOf(file) == dir }.map { file =>
+          configRules(ws.file(tool.absolutePath(prefix + file)).contents, base + "/" + dir)
+        }
+      }}
+    }
+    let nested = below
+      .filter { file => tool.configNames.contains(file.split("/").takeLast(1)[0] ?? "") }
+      .map { file => dirOf(file) }
+      .filter { dir => scopes.any { scope => scope.dir == dir } == false }
+      .map { dir => dir + "/" }
+    let custom = own.custom or scopes.any { scope => scope.rules.any { rules => rules.custom } }
+    let candidates = if (custom) {
+      found(ws, ["*.js", "*.jsx", "*.ts", "*.tsx", "*.mjs", "*.cjs", "*.mts", "*.cts"])
+    } else {
+      narrow
+    }
     tool.sorted(
-      found
+      candidates
         .filter { file =>
-          file.containsMatch(`((^|/)__tests__/.*|(^|/)([^/]*\.)?(spec|test)+)\.[mc]?[jt]sx?$`)
-            and file.hasPrefix("dist/") == false
-            and file.hasPrefix("build/") == false
-            and nested.any { dir => file.hasPrefix(dir) } == false
+          if (isConfigName(file.split("/").takeLast(1)[0] ?? "") or nested.any { dir => file.hasPrefix(dir) }) {
+            false
+          } else {
+            let matching = scopes.filter { scope => file.hasPrefix(scope.dir + "/") }
+            let longest = matching.reduce(0) { most, scope =>
+              if (size(scope.dir) > most) { size(scope.dir) } else { most }
+            }
+            let scope = matching.filter { scope => size(scope.dir) == longest }[0]
+            let rules = if (scope != null) {
+              scope.rules
+            } else if (own.projects.length > 0) {
+              []
+            } else {
+              [own]
+            }
+            rules.any { r => isTest(r, base + "/" + file) }
+          }
         }
         .uniq,
     )
+  }
+
+  """
+  Project-relative paths of the files under this project matching the
+  globs, plus every jest.config* file; node_modules, .git and git-ignored
+  files are pruned.
+  """
+  let found(ws: Workspace!, globs: [String!]!): [String!]! {
+    let prefix = if (path == ".") { "" } else { path + "/" }
+    ws
+      .search(
+        paths: [rootPath],
+        globs: globs + ["jest.config*", "!node_modules", "!.git"],
+        pattern: "",
+        filesOnly: true,
+        # The run mounts the source without git-ignored files.
+        skipIgnored: true,
+      ).{{filePath}}
+      .map { match => match.filePath.trimPrefix("/").trimPrefix("./").trimPrefix(prefix) }
+      .filter { file => file.containsMatch(`(^|/)node_modules/`) == false }
   }
 
   """
@@ -229,7 +817,7 @@ type JestProject {
   Error message from running this project's tests, or null when they pass.
   """
   let testFailure(ws: Workspace!): String {
-    { jestExec(ws, []).sync; null } rescue {
+    { jestFailure(ws, []) } rescue {
       err: Error => err.message
     }
   }
@@ -239,65 +827,373 @@ type JestProject {
   fail. A file Jest's own config does not treat as a test runs nothing.
   """
   let runFiles(ws: Workspace!, files: [String!]!): Void {
-    jestExec(ws, ["--passWithNoTests", "--runTestsByPath"] + files).sync rescue {
-      err: Error => raise "Jest tests in " + path + ": " + err.message
+    let failure = {
+      jestFailure(ws, ["--passWithNoTests", "--runTestsByPath"] + files)
+    } rescue {
+      err: Error => err.message
+    }
+    if (failure != null) {
+      raise "Jest project " + path + ": " + failure
     }
     null
   }
 
   """
-  Container that has run jest in this project with the given arguments.
+  Run jest in this project with the given arguments. Null when it passes,
+  otherwise which step failed and the end of its output.
   """
-  let jestExec(ws: Workspace!, args: [String!]!): Container! {
-    let src = source(ws)
-    let n = nodejs(src, tool.baseImageAddress, tool.packageManager)
-    let runtime = n.base
-
-    # optionally build first
-    if (tool.build) {
-      runtime = runtime.withExec([tool.packageManager, "run", "build"])
-    }
-
-    # install the local build of the otel library
-    runtime = n.withInstallLocalPackage(runtime, tool.buildLibrary)
-
-    # use the automatic environment instead of a custom jest environment
-    if (!tool.useEnv) {
-      let packageType = container
-        .from("alpine:3")
-        .withExec(["apk", "add", "jq"])
-        .withFile("/package.json", src.file("package.json"))
-        .withExec(["jq", ".type", "/package.json"])
-        .stdout
-
-      let opts = "$NODE_OPTIONS --import @dagger.io/jest/register "
-      if (packageType.contains("commonjs")) {
-        opts = "$NODE_OPTIONS --require @dagger.io/jest/register "
+  let jestFailure(ws: Workspace!, args: [String!]!): String {
+    let failure = installFailure(ws)
+    if (failure != null) {
+      failure
+    } else {
+      let ctr = runner(ws)
+      let built = if (tool.build) {
+        ctr.withExec([packageManager(ws), "run", "build"], expect: ReturnType.ANY)
+      } else {
+        ctr
       }
-      runtime = runtime
-        .withEnvVariable("NODE_OPTIONS", opts, expand: true)
+      let buildCode = built.exitCode
+      if (buildCode != 0) {
+        "build failed (" + packageManager(ws) + " run build, exit " + toString(buildCode) + ")" + output(built)
+      } else {
+        let ran = withLibrary(ws, built)
+          .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
+          .withExec(jest(ws, tool.flags + args), expect: ReturnType.ANY)
+        let code = ran.exitCode
+        if (code == 0) {
+          null
+        } else if (code == 127) {
+          ran.stderr.trim(" \n")
+        } else {
+          "jest failed (exit " + toString(code) + ")" + output(ran)
+        }
+      }
     }
+  }
 
-    runtime
-      .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
-      .withExec(["npx", "jest"] + tool.flags + args)
+  """
+  What a failed command wrote, to name what went wrong in an error: all of it
+  when short, else its first and last lines.
+  """
+  let output(ctr: Container!): String! {
+    let lines = (ctr.stderr + "\n" + ctr.stdout)
+      .split("\n")
+      .filter { line => line.trimSpace != "" }
+    let shown = if (lines.length <= 25) {
+      lines
+    } else {
+      lines.takeFirst(5) + ["..."] + lines.takeLast(20)
+    }
+    if (shown.length == 0) { "" } else { ":\n" + shown.join("\n") }
+  }
+
+  """
+  Where dependencies are installed: the nearest workspace root at or above
+  this project (pnpm-workspace.yaml, or a package.json with "workspaces"),
+  else the nearest lockfile's directory, else the nearest package.json's.
+  Null when there is no package.json at or above the project.
+  """
+  installRoot(ws: Workspace!): String {
+    if (ws.findUp("package.json", rootPath) == null) {
+      null
+    } else {
+      let workspaceRoot = tool.nearest([
+        tool.dirOf(ws.findUp("pnpm-workspace.yaml", rootPath)),
+        workspacesRoot(ws, rootPath),
+      ])
+      let lockRoot = tool.nearest(
+        lockfiles.map { name => tool.dirOf(ws.findUp(name, rootPath)) },
+      )
+      workspaceRoot ?? lockRoot ?? tool.dirOf(
+        ws.findUp("package.json", rootPath),
+      )
+    }
+  }
+
+  let lockfiles: [String!]! = [
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "bun.lock",
+    "bun.lockb",
+  ]
+
+  """
+  The nearest directory at or above from whose package.json declares
+  "workspaces", or null.
+  """
+  let workspacesRoot(ws: Workspace!, from: String!): String {
+    let found = ws.findUp("package.json", from)
+    if (found == null) {
+      null
+    } else {
+      let dir = tool.dirOf(found) ?? "."
+      if (ws.file(found ?? "").contents.contains("\"workspaces\"")) {
+        dir
+      } else if (dir == ".") {
+        null
+      } else {
+        workspacesRoot(ws, "/" + (tool.dirOf("/" + dir) ?? "."))
+      }
+    }
+  }
+
+  """
+  The package manager: the packageManager setting, else the one the install
+  root's package.json names in "packageManager", else the one its lockfile
+  belongs to, else npm.
+  """
+  packageManager(ws: Workspace!): String! {
+    let root = installRoot(ws) ?? path
+    if (tool.packageManager != "") {
+      tool.packageManager
+    } else {
+      let text = { ws.file("/" + tool.join(root, "package.json")).contents } rescue {
+        err: Error => ""
+      }
+      let declared = if (text.contains("\"packageManager\"")) {
+        text.replaceMatches(`(?s)^.*"packageManager"\s*:\s*"([a-zA-Z]+)@.*$`, with: "$1")
+      } else {
+        ""
+      }
+      if (["npm", "pnpm", "yarn", "bun"].contains(declared)) {
+        declared
+      } else if (has(ws, root, "pnpm-lock.yaml") or has(ws, root, "pnpm-workspace.yaml")) {
+        "pnpm"
+      } else if (has(ws, root, "yarn.lock")) {
+        "yarn"
+      } else if (has(ws, root, "bun.lock") or has(ws, root, "bun.lockb")) {
+        "bun"
+      } else {
+        "npm"
+      }
+    }
+  }
+
+  let has(ws: Workspace!, dir: String!, name: String!): Boolean! {
+    ws.findUp(name, "/" + dir) == "/" + tool.join(dir, name)
+  }
+
+  """
+  Everything the install reads, and nothing else, so editing source files
+  does not re-run it. Local directory dependencies (file:, link:, portal:)
+  are copied or linked by the install, so they are included whole; when
+  they can't be worked out, the install gets the whole source.
+  """
+  let installInputs(ws: Workspace!, root: String!): Directory! {
+    let local = localDependencies(ws, root)
+    if (local == null) {
+      ws.directory("/" + root, exclude: ["**/node_modules"], gitignore: true)
+    } else {
+      let empty: [String!]! = []
+      ws.directory(
+        "/" + root,
+        include: [
+          "**/package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          ".pnpmfile.cjs",
+          "yarn.lock",
+          ".yarnrc",
+          ".yarnrc.yml",
+          ".yarn/releases/**",
+          ".yarn/plugins/**",
+          ".yarn/patches/**",
+          "package-lock.json",
+          "npm-shrinkwrap.json",
+          "bun.lock",
+          "bun.lockb",
+          "bunfig.toml",
+          "**/.npmrc",
+          "patches/**",
+        ] + (local ?? empty).reduce(empty) { acc, dir => acc + [dir, dir + "/**"] },
+        exclude: ["**/node_modules"],
+      )
+    }
+  }
+
+  """
+  Paths, relative to the install root, that the install reads beyond the
+  manifests: directories package.json files under it depend on through file:,
+  link: or portal: specs, and the files their "bin" entries name, which the
+  install links into node_modules/.bin. Null when that can't be worked out
+  statically: a path that leaves the install root, or pnpm's
+  dependenciesMeta injected, which copies workspace packages by name.
+  """
+
+  """
+  The files a package.json's "bin" names, a string or an object of them.
+  """
+  let binTargets(text: String!): [String!]! {
+    let single = text.match(`"bin"\s*:\s*"([^"]+)"`)
+    let many = text.match(`"bin"\s*:\s*\{([^}]*)\}`)
+    if (single != null) {
+      [single.captures[0] ?? ""]
+    } else if (many != null) {
+      (many.captures[0] ?? "").matchAll(`"[^"]*"\s*:\s*"([^"]+)"`).map { m => m.captures[0] ?? "" }
+    } else {
+      []
+    }
+  }
+
+  let localDependencies(ws: Workspace!, root: String!): [String!] {
+    let empty: [String!]! = []
+    let manifests = ws
+      .search(
+        paths: ["/" + root],
+        globs: ["package.json", "!node_modules", "!.git"],
+        pattern: `"(?:file|link|portal):|"injected"|"bin"`,
+        filesOnly: true,
+      ).{{filePath}}
+      .map { hit => tool.relativeTo(root, tool.normalizePath(hit.filePath)) }
+    let specs = manifests.reduce(empty) { acc, file =>
+      let text = ws.file("/" + tool.join(root, file)).contents
+      let dir = tool.dirOf("/" + file) ?? "."
+      let injected = if (text.containsMatch(`"injected"\s*:\s*true`)) { ["<injected>"] } else { empty }
+      let bins = binTargets(text).map { target => tool.joinRelative(dir, target) }
+      acc + injected + bins + text.matchAll(`"(?:file|link|portal):([^"]*)"`).map { m =>
+        tool.joinRelative(dir, m.captures[0] ?? "")
+      }
+    }
+    if (specs.contains("<injected>") or specs.contains("<outside>")) {
+      null
+    } else {
+      specs.uniq
+    }
+  }
+
+  let installCommand(ws: Workspace!): [String!]! {
+    let pm = packageManager(ws)
+    let store = if (pm == "pnpm") { ["--store-dir", "/root/.pnpm-store"] } else { [] }
+    [pm, "install"] + store + tool.installFlags
+  }
+
+  """
+  The install root with its dependencies installed. The install may have
+  failed: read exitCode.
+  """
+  let installed(ws: Workspace!, root: String!): Container! {
+    tool
+      .nodeBase(packageManager(ws))
+      .withDirectory("/src", installInputs(ws, root))
+      .withWorkdir("/src")
+      .withExec(installCommand(ws), expect: ReturnType.ANY)
+  }
+
+  """
+  Why installing dependencies failed, with the end of its output, or null.
+  """
+  let installFailure(ws: Workspace!): String {
+    let root = installRoot(ws)
+    if (root == null) {
+      null
+    } else {
+      let ran = installed(ws, root ?? ".")
+      let code = ran.exitCode
+      if (code == 0) {
+        null
+      } else {
+        let out = (ran.stdout.trim(" \n") + "\n" + ran.stderr.trim(" \n")).trim(" \n")
+        "install failed (" + installCommand(ws).join(" ") + ", exit " + toString(code) + "):\n"
+          + out.split("\n").takeLast(15).join("\n")
+      }
+    }
+  }
+
+  """
+  Container that runs Jest, with this project as the working directory.
+  With a package.json at or above the project, the install root's
+  dependencies are installed and the source laid over them; otherwise npx
+  fetches Jest on demand.
+  """
+  let runner(ws: Workspace!): Container! {
+    let root = installRoot(ws)
+    let mount = root ?? path
+    let source = ws.directory("/" + mount, exclude: ["**/node_modules"], gitignore: true)
+    let ctr = if (root == null) {
+      tool.nodeBase("npm").withDirectory("/src", source)
+    } else {
+      installed(ws, root ?? ".")
+        .withDirectory("/src", source)
+        # 493 is 0755.
+        .withNewFile("/usr/local/bin/jest", wrapper(root ?? "."), permissions: 493)
+    }
+    let dir = tool.relativeTo(mount, path)
+    let configured = tool.environment.reduce(ctr) { acc, pair =>
+      let key = pair.replaceMatches(`(?s)=.*$`, with: "")
+      acc.withEnvVariable(key, pair.trimPrefix(key + "="))
+    }
+    configured.withWorkdir(if (dir == ".") { "/src" } else { "/src/" + dir })
+  }
+
+  """
+  The runner with the Dagger Jest library in place: preloaded through
+  NODE_OPTIONS, or, with useEnv, linked as @dagger.io/jest so the project's
+  own config can name its environment.
+  """
+  let withLibrary(ws: Workspace!, ctr: Container!): Container! {
+    let withLib = ctr.withMountedDirectory(tool.libraryPath, tool.buildLibrary)
+    if (tool.useEnv) {
+      withLib.withExec([
+        "sh",
+        "-c",
+        "mkdir -p /src/node_modules/@dagger.io && ln -sfn " + tool.libraryPath + " /src/node_modules/@dagger.io/jest",
+      ])
+    } else {
+      withLib.withEnvVariable(
+        "NODE_OPTIONS",
+        "$NODE_OPTIONS --require " + tool.libraryPath + "/dist/cjs/register.cjs",
+        expand: true,
+      )
+    }
+  }
+
+  """
+  The Jest command: npx without a package.json, otherwise the wrapper runner
+  installs, which runs the project's own Jest.
+  """
+  let jest(ws: Workspace!, args: [String!]!): [String!]! {
+    if (installRoot(ws) == null) { ["npx", "--yes", "jest"] + args } else { ["jest"] + args }
+  }
+
+  """
+  A jest command that runs the nearest node_modules/.bin/jest between the
+  working directory and the install root, or yarn's under Plug'n'Play, and
+  says how to fix it when there is none.
+  """
+  let wrapper(root: String!): String! {
+    "#!/bin/sh\n"
+      + "d=\"$PWD\"\n"
+      + "while :; do\n"
+      + "  if [ -x \"$d/node_modules/.bin/jest\" ]; then exec \"$d/node_modules/.bin/jest\" \"$@\"; fi\n"
+      + "  if [ \"$d\" = /src ] || [ \"$d\" = / ]; then break; fi\n"
+      + "  d=$(dirname \"$d\")\n"
+      + "done\n"
+      + "if [ -f /src/.pnp.cjs ]; then exec yarn jest \"$@\"; fi\n"
+      + "echo \"jest is not installed: add it to the devDependencies of "
+      + tool.join(root, "package.json")
+      + " (or of a package.json between it and the project)\" >&2\n"
+      + "exit 127\n"
   }
 
   """
   List the tests Jest finds in this project.
   """
   list(ws: Workspace!): String {
-    nodejs(source(ws), tool.baseImageAddress, tool.packageManager)
-      .base
-      .withExec(["npx", "jest", "--listTests"])
-      .stdout
+    let failure = installFailure(ws)
+    if (failure != null) {
+      raise failure
+    }
+    runner(ws).withExec(jest(ws, ["--listTests"])).stdout
   }
 
   """
   Source directory of this project.
   """
   source(ws: Workspace!): Directory! {
-    ws.directory(rootPath, exclude: ["**/node_modules", "dist", "build"])
+    ws.directory(rootPath, exclude: ["**/node_modules"])
   }
 }
 
@@ -357,7 +1253,7 @@ type JestTestFile {
   let project: JestProject!
 
   """
-  Run this test file.
+  Run Jest tests.
   """
   test(ws: Workspace!): Void @check {
     project.runFiles(ws, [path])
