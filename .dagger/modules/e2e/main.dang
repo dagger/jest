@@ -199,9 +199,8 @@ type E2e {
 
   """
   Test files are found statically with Jest's default testMatch, keyed by
-  project-relative path in byte order. node_modules, the dist and build
-  directories and nested projects are left out, and so are files that only
-  look like tests.
+  project-relative path in byte order. node_modules, git-ignored files and
+  nested projects are left out, and so are files that only look like tests.
   """
   testFileDiscoveryCheck: Void @check {
     let test = "test('passes', () => {})\n"
@@ -222,6 +221,10 @@ type E2e {
       .withNewFile("lib/node_modules/dep/__tests__/e.js", test)
       .withNewFile("dist/f.test.js", test)
       .withNewFile("build/g.test.js", test)
+      # A git checkout: ripgrep reads .gitignore only inside a repository.
+      .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile(".gitignore", "ignored/\n")
+      .withNewFile("ignored/j.test.js", test)
       .withNewFile("sub/jest.config.js", "module.exports = {}\n")
       .withNewFile("sub/h.spec.ts", test)
       .withNewFile("sub/__tests__/i.js", test)
@@ -234,6 +237,8 @@ type E2e {
       [
         "__tests__/b.js",
         "__tests__/deep/c.tsx",
+        "build/g.test.js",
+        "dist/f.test.js",
         "src/a.test.js",
         "test.js",
         "x.test.mjs",
@@ -421,6 +426,292 @@ type E2e {
       "the build output existed without build",
     )
 
+    null
+  }
+
+  """
+  A project with Jest installed, for the checks below that run Jest on
+  synthetic projects. They share one package.json, so they share one install.
+  """
+  let fixture(files: Directory!): Directory! {
+    directory
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"fixture\", \"private\": true, \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+      )
+      .withNewFile("jest.config.js", "module.exports = {}\n")
+      .withDirectory(".", files)
+  }
+
+  """
+  Why a project's whole run failed, or "passed".
+  """
+  let outcome(tree: Directory!, tool: Jest!): String! {
+    let ws = tree.asWorkspace
+    let result = {
+      tool.projects(ws).batch.test(ws)
+      "passed"
+    } rescue {
+      err: Error => err.message
+    }
+    result
+  }
+
+  """
+  A test that takes Jest's done callback runs under the Dagger hook: the hook
+  keeps the test function's arity, so Jest still passes done.
+  """
+  doneCallbackCheck: Void @check {
+    let tree = fixture(
+      directory.withNewFile(
+        "done.test.js",
+        "test('calls done', (done) => { setTimeout(() => { expect(1).toBe(1); done() }, 10) })\n",
+      ),
+    )
+    let result = outcome(tree, jest)
+    assert(result == "passed", "a done-callback test failed under the hook: " + result)
+    null
+  }
+
+  """
+  Every span is exported and ended, whether Jest runs files in worker
+  processes or in band: each file flushes its spans when it finishes, and a
+  skipped or todo test's span ends too, and a test that deletes web globals
+  such as ReadableStream doesn't break the export. The fixture's globalSetup points the
+  exporter at a local collector that decodes what arrives, and its
+  globalTeardown fails the run unless every expected span arrived ended.
+  """
+  spanExportCheck: Void @check {
+    let collector = ```js
+      const http = require("http");
+      const root = require("/opt/dagger-jest/node_modules/@opentelemetry/otlp-transformer/build/src/generated/root.js");
+      const Request = root.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
+      module.exports.setup = async () => {
+        const spans = {};
+        const server = http.createServer((req, res) => {
+          const chunks = [];
+          req.on("data", (c) => chunks.push(c));
+          req.on("end", () => {
+            const request = Request.decode(Buffer.concat(chunks));
+            for (const rs of request.resourceSpans) {
+              for (const ss of rs.scopeSpans) {
+                for (const span of ss.spans) {
+                  const ended = String(span.endTimeUnixNano) !== "0";
+                  spans[span.name] = spans[span.name] || ended;
+                }
+              }
+            }
+            res.writeHead(200, { "content-type": "application/x-protobuf" });
+            res.end();
+          });
+        });
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+        process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://127.0.0.1:" + server.address().port + "/v1/traces";
+        globalThis.__collector = { server, spans };
+      };
+      module.exports.teardown = async () => {
+        const { server, spans } = globalThis.__collector;
+        server.close();
+        const expected = ["alpha", "bravo", "charlie", "delta"]
+          .flatMap((name) => [name + ".test.js", "span-marker-" + name])
+          .concat(["slow.test.js", "slow-describe", "slow-test", "skipped-test", "todo-test", "globals-test"]);
+        const missing = expected.filter((name) => spans[name] !== true);
+        if (missing.length > 0) {
+          throw new Error("spans not exported ended: " + missing.join(", "));
+        }
+      };
+    ``` + "\n"
+    let files = ["alpha", "bravo", "charlie", "delta"].reduce(
+      directory
+        .withNewFile("collector.js", collector)
+        .withNewFile("setup.js", "module.exports = require('./collector').setup\n")
+        .withNewFile("teardown.js", "module.exports = require('./collector').teardown\n")
+        .withNewFile(
+          "slow.test.js",
+          "describe('slow-describe', () => {\n  test('slow-test', () => new Promise((resolve) => setTimeout(resolve, 500)))\n  test.skip('skipped-test', () => {})\n  test.todo('todo-test')\n})\n",
+        )
+        # A test that removes web globals from its own global object must not
+        # break the exporter, which runs outside the test's realm.
+        .withNewFile(
+          "globals.test.js",
+          "test('globals-test', async () => {\n  delete global.ReadableStream\n  delete global.fetch\n  delete global.TextEncoder\n  await new Promise((resolve) => setTimeout(resolve, 300))\n})\n",
+        ),
+    ) { dir, name =>
+      dir.withNewFile(name + ".test.js", "test('span-marker-" + name + "', () => {})\n")
+    }
+    let config(workers: Int!): String! {
+      "module.exports = { globalSetup: './setup.js', globalTeardown: './teardown.js', maxWorkers: "
+        + toString(workers) + " }\n"
+    }
+    let workers = outcome(
+      fixture(files).withNewFile("jest.config.js", config(2)),
+      jest,
+    )
+    assert(workers == "passed", "spans were lost with worker processes: " + workers)
+    let inBand = outcome(
+      fixture(files).withNewFile("jest.config.js", config(1)),
+      jest,
+    )
+    assert(inBand == "passed", "spans were lost in band: " + inBand)
+    null
+  }
+
+  """
+  A config that fails to load fails the run with Jest's own error in the
+  message, hook or no hook.
+  """
+  configErrorCheck: Void @check {
+    let tree = fixture(
+      directory
+        .withNewFile("jest.config.js", "throw new Error('config-error-marker')\n")
+        .withNewFile("a.test.js", "test('a', () => {})\n"),
+    )
+    let result = outcome(tree, jest)
+    assert(result.contains("jest failed"), "the failing step was not named: " + result)
+    assert(result.contains("config-error-marker"), "the config error was swallowed: " + result)
+    let withEnv = outcome(tree, jest(useEnv: true))
+    assert(withEnv.contains("config-error-marker"), "the config error was swallowed with useEnv: " + withEnv)
+    null
+  }
+
+  """
+  Install behaviour: a failing install names its step and command,
+  installFlags reach the install, environment reaches the tests, and a
+  project without Jest installed says so instead of fetching it.
+  """
+  installCheck: Void @check {
+    let scripted = directory
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"scripted\", \"private\": true, \"scripts\": {\"postinstall\": \"exit 3\"}, \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+      )
+      .withNewFile("jest.config.js", "module.exports = {}\n")
+      .withNewFile("env.test.js", "test('env', () => { expect(process.env.FIXTURE_VALUE).toBe('a=b') })\n")
+    let failedInstall = outcome(scripted, jest)
+    assert(
+      failedInstall.contains("install failed (npm install, exit"),
+      "the failing install was not named: " + failedInstall,
+    )
+    let fixed = outcome(scripted, jest(installFlags: ["--ignore-scripts"], environment: ["FIXTURE_VALUE=a=b"]))
+    assert(fixed == "passed", "installFlags or environment did not apply: " + fixed)
+
+    let missing = directory
+      .withNewFile("package.json", "{\"name\": \"bare\", \"private\": true}\n")
+      .withNewFile("jest.config.js", "module.exports = {}\n")
+      .withNewFile("a.test.js", "test('a', () => {})\n")
+    let notInstalled = outcome(missing, jest)
+    assert(notInstalled.contains("jest is not installed"), "a missing jest was not reported: " + notInstalled)
+    null
+  }
+
+  """
+  A monorepo whose root config lists its packages in `projects`, with
+  package configs that load a shared file from the root: the root project
+  runs them, so the packages are not keyed again, and each package's files
+  are keyed under the root and filtered by that package's literal config.
+  Entering a package runs it on its own, with the whole workspace mounted.
+  """
+  monorepoCheck: Void @check {
+    let test = "test('passes', () => {})\n"
+    let tree = directory
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"mono\", \"private\": true, \"workspaces\": [\"packages/a\", \"packages/b\"], \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+      )
+      .withNewFile("jest.base.config.js", "module.exports = (dir) => ({ rootDir: dir })\n")
+      .withNewFile(
+        "jest.config.js",
+        "module.exports = {\n  projects: ['<rootDir>/packages/*/jest.config.js', '<rootDir>/packages/*/jest.config-*.js'],\n}\n",
+      )
+      .withNewFile("packages/a/package.json", "{\"name\": \"a\", \"version\": \"1.0.0\"}\n")
+      .withNewFile(
+        "packages/a/jest.config.js",
+        "module.exports = { ...require('../../jest.base.config')(__dirname), testRegex: '__tests__/base/.*\\\\.js$' }\n",
+      )
+      .withNewFile("packages/a/__tests__/base/one.js", test)
+      .withNewFile("packages/a/__tests__/utils/helper.js", "module.exports = {}\n")
+      .withNewFile("packages/b/package.json", "{\"name\": \"b\", \"version\": \"1.0.0\"}\n")
+      .withNewFile(
+        "packages/b/jest.config-node.js",
+        "module.exports = { rootDir: __dirname, testPathIgnorePatterns: ['/node_modules/', '/slow/'] }\n",
+      )
+      .withNewFile("packages/b/two.test.js", test)
+      .withNewFile("packages/b/slow/three.test.js", failingTest)
+      .withNewFile("docs/vendor/test.js", failingTest)
+    let ws = tree.asWorkspace
+    let found = jest.projects(ws)
+    assertKeys(found.keys, ["."], "projects")
+    let files = found.get(key: ".").tests(ws)
+    assertKeys(
+      files.keys,
+      ["packages/a/__tests__/base/one.js", "packages/b/two.test.js"],
+      "monorepo test files",
+    )
+    run(files.batch.test(ws))
+    run(files.subset(keys: ["packages/b/two.test.js"]).batch.test(ws))
+
+    let inA = tree.asWorkspace(cwd: "packages/a/__tests__")
+    let own = jest.projects(inA)
+    assertKeys(own.keys, ["packages/a"], "projects from inside packages/a")
+    assertKeys(
+      own.get(key: "packages/a").tests(inA).keys,
+      ["__tests__/base/one.js"],
+      "packages/a test files",
+    )
+    run(own.get(key: "packages/a").tests(inA).batch.test(inA))
+    null
+  }
+
+  """
+  A file: dependency is installed from its own files, not just its
+  package.json: the install copies or links it, so its whole directory is an
+  install input.
+  """
+  localDependencyCheck: Void @check {
+    let tree = directory
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"local\", \"private\": true, \"devDependencies\": {\"jest\": \"30.2.0\", \"local-dep\": \"file:./local-dep\"}}\n",
+      )
+      .withNewFile("local-dep/package.json", "{\"name\": \"local-dep\", \"version\": \"1.0.0\", \"main\": \"index.js\"}\n")
+      .withNewFile("local-dep/index.js", "module.exports = { answer: 42 }\n")
+      .withNewFile("jest.config.js", "module.exports = {}\n")
+      .withNewFile("local.test.js", "test('local', () => { expect(require('local-dep').answer).toBe(42) })\n")
+    let result = outcome(tree, jest)
+    assert(result == "passed", "a file: dependency was not installed: " + result)
+    null
+  }
+
+  """
+  A workspace package's bin is linked into node_modules/.bin: the file it
+  names is an install input, so pnpm can link it before the source is laid
+  over the install.
+  """
+  workspaceBinCheck: Void @check {
+    let tree = directory
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"binws\", \"private\": true, \"packageManager\": \"pnpm@9.15.0\", \"devDependencies\": {\"jest\": \"30.2.0\", \"fixture-cli\": \"workspace:*\"}}\n",
+      )
+      .withNewFile("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n")
+      .withNewFile(
+        "packages/cli/package.json",
+        "{\"name\": \"fixture-cli\", \"version\": \"1.0.0\", \"bin\": {\"fixture-cli\": \"bin/cli.js\"}}\n",
+      )
+      # 493 is 0755.
+      .withNewFile(
+        "packages/cli/bin/cli.js",
+        "#!/usr/bin/env node\nconsole.log('cli-ok')\n",
+        permissions: 493,
+      )
+      .withNewFile("jest.config.js", "module.exports = { testPathIgnorePatterns: ['/node_modules/', '/packages/'] }\n")
+      .withNewFile(
+        "cli.test.js",
+        "const { execFileSync } = require('child_process')\nconst path = require('path')\ntest('cli', () => {\n  expect(execFileSync(path.join(__dirname, 'node_modules/.bin/fixture-cli')).toString()).toContain('cli-ok')\n})\n",
+      )
+    # No lockfile in the fixture, so let pnpm write one.
+    let result = outcome(tree, jest(installFlags: ["--no-frozen-lockfile"]))
+    assert(result == "passed", "a workspace package's bin was not linked: " + result)
     null
   }
 }
