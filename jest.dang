@@ -848,12 +848,15 @@ type JestProject {
       failure
     } else {
       let ctr = runner(ws)
-      let built = if (tool.build and hasBuildScript(ws)) {
+      let building = tool.build and hasBuildScript(ws)
+      let built = if (building) {
         ctr.withExec([packageManager(ws), "run", "build"], expect: ReturnType.ANY)
       } else {
         ctr
       }
-      let buildCode = built.exitCode
+      # Without a build, the runner may have run nothing yet, and a container
+      # that has run nothing has no exit code.
+      let buildCode = if (building) { built.exitCode } else { 0 }
       if (buildCode != 0) {
         "build failed (" + packageManager(ws) + " run build, exit " + toString(buildCode) + ")" + output(built)
       } else {
@@ -1131,7 +1134,7 @@ type JestProject {
       installed(ws, root ?? ".")
         .withDirectory("/src", source)
         # 493 is 0755.
-        .withNewFile("/usr/local/bin/jest", wrapper(root ?? "."), permissions: 493)
+        .withNewFile(wrapperPath, wrapper(root ?? "."), permissions: 493)
     }
     let dir = tool.relativeTo(mount, path)
     let configured = tool.environment.reduce(ctr) { acc, pair =>
@@ -1168,8 +1171,14 @@ type JestProject {
   installs, which runs the project's own Jest.
   """
   let jest(ws: Workspace!, args: [String!]!): [String!]! {
-    if (installRoot(ws) == null) { ["npx", "--yes", "jest"] + args } else { ["jest"] + args }
+    if (installRoot(ws) == null) { ["npx", "--yes", "jest"] + args } else { [wrapperPath] + args }
   }
+
+  """
+  Where the wrapper lives: off PATH and always called by its absolute path,
+  so npx, yarn and pnpm never find it when they look for jest.
+  """
+  let wrapperPath: String! = "/opt/dagger-jest-runner/jest"
 
   """
   A jest command that runs the nearest node_modules/.bin/jest between the
