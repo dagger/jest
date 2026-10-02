@@ -733,4 +733,19 @@ type E2e {
     assert(broken.contains("build failed (npm run build, exit 4)"), "a failing build was not named: " + broken)
     null
   }
+
+  """
+  A project with a jest config but no package.json runs its tests through
+  npx, which fetches Jest, and the run completes.
+  """
+  noPackageJsonCheck: Void @check {
+    let tree = directory
+      .withNewFile("jest.config.js", "module.exports = {}\n")
+      .withNewFile("n.test.js", "test('n', () => { expect(1).toBe(1) })\n")
+    let result = outcome(tree, jest)
+    assert(result == "passed", "a project without a package.json did not run: " + result)
+    let failing = outcome(tree.withNewFile("broken.test.js", failingTest), jest)
+    assert(failing.contains("jest failed (exit 1)"), "a failing test without a package.json was not reported: " + failing)
+    null
+  }
 }
