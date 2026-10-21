@@ -859,7 +859,27 @@ type JestProject {
       } else {
         let ran = withLibrary(ws, built)
           .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
-          .withExec(jest(ws, tool.flags + args), expect: ReturnType.ANY)
+          # A test that uses a Dagger SDK opens a session from inside this
+          # container, and a session finds its workspace root by walking up to a
+          # .git directory. Without one it gets an empty workspace, so every
+          # workspace-relative API fails there -- including the serveModule a
+          # generated module client calls before its first query. The marker only
+          # has to exist, so synthesize an empty one rather than uploading the
+          # real git directory; a workspace built from a Directory has none to
+          # upload anyway.
+          .withDirectory("/src/.git", directory)
+          # With its own session rather than the one running Jest, a module
+          # address resolves against the user's workspace instead of against
+          # this module. The engine mounts a version-matched CLI on PATH for it,
+          # which a TypeScript client on SDK v1.0.4 or later finds by itself;
+          # an older one only reads _EXPERIMENTAL_DAGGER_CLI_BIN, so keep
+          # setting it until those are out of support.
+          .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
+          .withExec(
+            jest(ws, tool.flags + args),
+            daggerInDaggerNewSession: true,
+            expect: ReturnType.ANY,
+          )
         let code = ran.exitCode
         if (code == 0) {
           null
@@ -1090,8 +1110,8 @@ type JestProject {
   let installed(ws: Workspace!, root: String!): Container! {
     tool
       .nodeBase(packageManager(ws))
-      .withDirectory("/src", installInputs(ws, root))
-      .withWorkdir("/src")
+      .withDirectory(tool.containerPath(root), installInputs(ws, root))
+      .withWorkdir(tool.containerPath(root))
       .withExec(installCommand(ws), expect: ReturnType.ANY)
   }
 
@@ -1126,10 +1146,10 @@ type JestProject {
     let mount = root ?? path
     let source = ws.directory("/" + mount, exclude: ["**/node_modules"], gitignore: true)
     let ctr = if (root == null) {
-      tool.nodeBase("npm").withDirectory("/src", source)
+      tool.nodeBase("npm").withDirectory(tool.containerPath(mount), source)
     } else {
       installed(ws, root ?? ".")
-        .withDirectory("/src", source)
+        .withDirectory(tool.containerPath(mount), source)
         # 493 is 0755.
         .withNewFile("/usr/local/bin/jest", wrapper(root ?? "."), permissions: 493)
     }
@@ -1138,7 +1158,7 @@ type JestProject {
       let key = pair.replaceMatches(`(?s)=.*$`, with: "")
       acc.withEnvVariable(key, pair.trimPrefix(key + "="))
     }
-    configured.withWorkdir(if (dir == ".") { "/src" } else { "/src/" + dir })
+    configured.withWorkdir(tool.containerPath(path))
   }
 
   """
@@ -1146,13 +1166,17 @@ type JestProject {
   NODE_OPTIONS, or, with useEnv, linked as @dagger.io/jest so the project's
   own config can name its environment.
   """
+  let installBase(ws: Workspace!): String! {
+    tool.containerPath(installRoot(ws) ?? path)
+  }
+
   let withLibrary(ws: Workspace!, ctr: Container!): Container! {
     let withLib = ctr.withMountedDirectory(tool.libraryPath, tool.buildLibrary)
     if (tool.useEnv) {
       withLib.withExec([
         "sh",
         "-c",
-        "mkdir -p /src/node_modules/@dagger.io && ln -sfn " + tool.libraryPath + " /src/node_modules/@dagger.io/jest",
+        "mkdir -p " + installBase(ws) + "/node_modules/@dagger.io && ln -sfn " + tool.libraryPath + " " + installBase(ws) + "/node_modules/@dagger.io/jest",
       ])
     } else {
       withLib.withEnvVariable(
@@ -1181,10 +1205,10 @@ type JestProject {
       + "d=\"$PWD\"\n"
       + "while :; do\n"
       + "  if [ -x \"$d/node_modules/.bin/jest\" ]; then exec \"$d/node_modules/.bin/jest\" \"$@\"; fi\n"
-      + "  if [ \"$d\" = /src ] || [ \"$d\" = / ]; then break; fi\n"
+      + "  if [ \"$d\" = " + tool.containerPath(root) + " ] || [ \"$d\" = / ]; then break; fi\n"
       + "  d=$(dirname \"$d\")\n"
       + "done\n"
-      + "if [ -f /src/.pnp.cjs ]; then exec yarn jest \"$@\"; fi\n"
+      + "if [ -f " + tool.containerPath(root) + "/.pnp.cjs ]; then exec yarn jest \"$@\"; fi\n"
       + "echo \"jest is not installed: add it to the devDependencies of "
       + tool.join(root, "package.json")
       + " (or of a package.json between it and the project)\" >&2\n"
