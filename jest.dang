@@ -308,6 +308,62 @@ let isConfigName(name: String!): Boolean! {
   name.containsMatch(`^jest\.config(?:[.-][^/]*)?\.(?:[mc]?[jt]s|json)$`)
 }
 
+# The key standing for every test a file declares, named or not.
+let anyTest: String! = "*"
+
+# A call to a Jest suite or test function, with its modifier chain: describe,
+# it and test, their jasmine aliases, and modifiers such as .only. The opening
+# paren is part of the match, so calls and bare parens form one token stream.
+let testCall = `(?:[fx]?describe|[fx]?it|test)(?:\.(?:only|skip|failing|concurrent|todo|each))*\s*\(`
+
+# The tests a file declares, named as Jest names them: the literal names of the
+# enclosing describes and of the test itself, separated by spaces, in source
+# order. A name that is not a string literal, one a `.each` row formats, and the
+# tests under a describe with such a name are left out, since Jest's name for
+# them is not in the source. A file that declares none is keyed with anyTest.
+let testNames(text: String!): [String!]! {
+  let source = prepare(text)
+  let masked = mask(source)
+  # Names are read from the source, where the literals survive, and paired by
+  # offset with the calls found in the masked source, where parens inside
+  # strings and comments are gone and the nesting is sound.
+  let literals = source.matchAll(Regexp(`\b` + testCall + `\s*(` + stringLiteral + `)`)).map { m =>
+    let value = stringValue(m.captures[0] ?? "") ?? ""
+    # prepare() flattens non-ASCII characters, so a name the source does not
+    # hold verbatim was mangled: --testNamePattern would never match it.
+    let kept = if (value.contains("?") and text.contains(value) == false) { "" } else { value }
+    {{start: m.start, name: kept}}
+  }
+  let frames: [{{depth: Int!, name: String!}}]! = []
+  let empty: [String!]! = []
+  let state = masked
+    # A member call such as regexp.test(s) declares nothing, but its paren
+    # still counts.
+    .matchAll(Regexp(`\.\s*` + testCall + `|\b` + testCall + `|[()]`))
+    .reduce({{depth: 0, stack: frames, out: empty}}) { st, m =>
+      if (m.string == ")") {
+        let depth = st.depth - 1
+        {{depth: depth, stack: st.stack.filter { f => f.depth < depth }, out: st.out}}
+      } else if (m.string == "(" or m.string.hasPrefix(".")) {
+        {{depth: st.depth + 1, stack: st.stack, out: st.out}}
+      } else {
+        let name = if (m.string.contains(".each")) { "" } else {
+          literals.filter { l => l.start == m.start }.map { l => l.name }[0] ?? ""
+        }
+        let prefix = st.stack.map { f => f.name }
+        if (m.string.containsMatch(`^[fx]?describe`)) {
+          {{depth: st.depth + 1, stack: st.stack + [{{depth: st.depth, name}}], out: st.out}}
+        } else if (name == "" or prefix.contains("")) {
+          {{depth: st.depth + 1, stack: st.stack, out: st.out}}
+        } else {
+          {{depth: st.depth + 1, stack: st.stack, out: st.out + [(prefix + [name]).join(" ")]}}
+        }
+      }
+    }
+  let found = state.out.uniq
+  if (found.length == 0) { [anyTest] } else { found }
+}
+
 """
 Toolchain to execute Jest tests
 """
@@ -705,8 +761,15 @@ type JestProject {
   """
   Test files in this project, keyed by project-relative path.
   """
-  tests(ws: Workspace!): JestTestFiles! {
-    JestTestFiles(files: testFiles(ws), project: self)
+  testFiles(ws: Workspace!): JestTestFiles! {
+    JestTestFiles(files: testFilePaths(ws), project: self)
+  }
+
+  """
+  The contents of a project-relative file.
+  """
+  let fileContents(ws: Workspace!, file: String!): String! {
+    ws.file(tool.absolutePath(tool.join(path, file))).contents
   }
 
   # Test files are found with one ripgrep search over the project rather than
@@ -717,7 +780,7 @@ type JestProject {
   # they are keyed here and filtered by that project's config. Configs are read
   # statically: literal testMatch, testRegex, testPathIgnorePatterns, roots and
   # rootDir are honoured; anything else takes Jest's default.
-  let testFiles(ws: Workspace!): [String!]! {
+  let testFilePaths(ws: Workspace!): [String!]! {
     let prefix = if (path == ".") { "" } else { path + "/" }
     let base = tool.containerPath(path)
     let narrow = found(ws, ["**/__tests__/**", "*test.*", "*spec.*"])
@@ -824,11 +887,16 @@ type JestProject {
 
   """
   Run the given project-relative test files, naming this project when they
-  fail. A file Jest's own config does not treat as a test runs nothing.
+  fail. With names, only the tests Jest calls by those names run. A file
+  Jest's own config does not treat as a test runs nothing.
   """
-  let runFiles(ws: Workspace!, files: [String!]!): Void {
+  let runFiles(ws: Workspace!, files: [String!]!, names: [String!]!): Void {
+    let patterns = names.map { name => Regexp.escape(name) }
+    let select = if (patterns.length == 0) { ["--passWithNoTests", "--runTestsByPath"] } else {
+      ["--passWithNoTests", "--runTestsByPath", "--testNamePattern", "^(?:" + patterns.join("|") + ")$"]
+    }
     let failure = {
-      jestFailure(ws, ["--passWithNoTests", "--runTestsByPath"] + files)
+      jestFailure(ws, select + files)
     } rescue {
       err: Error => err.message
     }
@@ -1260,7 +1328,7 @@ type JestTestFiles @collection {
   """
   Run the selected test files in this project.
   """
-  test(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void {
     # With nothing selected out, run the project as a whole with its own
     # config rather than listing every file. Without a delta, the explicit
     # list is the safe choice.
@@ -1272,7 +1340,7 @@ type JestTestFiles @collection {
     if (whole) {
       project.test(ws)
     } else if (files.length > 0) {
-      project.runFiles(ws, files)
+      project.runFiles(ws, files, [])
     }
     null
   }
@@ -1290,9 +1358,91 @@ type JestTestFile {
   let project: JestProject!
 
   """
-  Run Jest tests.
+  Tests this file declares, keyed by the name Jest calls them by.
+  """
+  tests(ws: Workspace!): JestTests! {
+    JestTests(names: testNames(project.fileContents(ws, path)), file: self)
+  }
+
+  """
+  Run every test in this file.
+  """
+  test(ws: Workspace!): Void {
+    project.runFiles(ws, [path], [])
+  }
+
+  """
+  Run the named tests in this file. "*" stands for every test it declares,
+  including the ones whose name is not in its source.
+  """
+  let runTests(ws: Workspace!, names: [String!]!): Void {
+    if (names.contains(anyTest)) {
+      test(ws)
+    } else {
+      project.runFiles(ws, [path], names)
+    }
+  }
+}
+
+"""
+The tests a Jest test file declares, keyed by name.
+"""
+type JestTests @collection {
+  """
+  Test names, as Jest joins them: the enclosing describes and the test.
+  """
+  names: [String!]! @keys
+
+  """
+  Tests selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta
+
+  let file: JestTestFile!
+
+  """
+  The test with this name.
+  """
+  named(name: String!): JestTest! @get {
+    JestTest(name: name, file: file)
+  }
+
+  """
+  Run the selected tests.
   """
   test(ws: Workspace!): Void @check {
-    project.runFiles(ws, [path])
+    # With nothing selected out, run the file with no name filter, so the
+    # tests whose name the source does not hold run too. Without a delta, the
+    # explicit list is the safe choice.
+    let whole = if (delta == null) {
+      false
+    } else {
+      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
+    }
+    if (whole) {
+      file.test(ws)
+    } else if (names.length > 0) {
+      file.runTests(ws, names)
+    }
+    null
+  }
+}
+
+"""
+A single Jest test.
+"""
+type JestTest {
+  """
+  The name Jest calls this test by.
+  """
+  name: String!
+
+  let file: JestTestFile!
+
+  """
+  Run this test.
+  """
+  test(ws: Workspace!): Void @check {
+    file.runTests(ws, [name])
   }
 }
