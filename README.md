@@ -1,6 +1,6 @@
 # Jest Dagger Toolchain
 
-Runs your [Jest](https://jestjs.io) tests in Dagger, one check per project,
+Runs your [Jest](https://jestjs.io) tests in Dagger, one check per test file,
 with every test exported to OpenTelemetry as a span.
 
 ## Requirements
@@ -17,26 +17,30 @@ dagger install github.com/dagger/jest
 
 ```sh
 dagger check                                   # every Jest project visible from here
-dagger check -l --all                          # one line per project and test file
+dagger check -l --all                          # one line per project, test file and test
 dagger check --jest --jest-project=web
 dagger check --jest --jest-project=web --jest-test-file=src/App.test.jsx
-dagger check jest/projects/tests/test --jest-test-file=src/App.test.jsx
+dagger check --jest --jest-test='App renders the header'
+dagger check jest/projects/test-files/tests/test --jest-test-file=src/App.test.jsx
 dagger check -l --all --jest -f=cli            # each line as flags to reuse
 dagger list jest-projects -a
 dagger list jest-test-files -a --jest-project=web
+dagger list jest-tests -a --jest-test-file=src/App.test.jsx
 ```
 
-The toolchain has one check, `test`, at `jest/projects/tests/test`. It runs
-once per selected project, over that project's selected test files:
+The toolchain has one check, `test`, at `jest/projects/test-files/tests/test`.
+It runs once per selected test file, over that file's selected tests:
 
-- With every test file of the project selected, it runs `jest` with no file
-  arguments, so Jest's own configuration decides what runs.
-- With some filtered out, it runs `jest --passWithNoTests --runTestsByPath
-  <files>` over the selected files only.
+- With every test of the file selected, it runs `jest --passWithNoTests
+  --runTestsByPath <file>`, so Jest's own configuration decides which of its
+  tests run.
+- With some filtered out, it adds `--testNamePattern '^(?:<names>)$'`, so only
+  the selected ones run.
 
 `dagger check -l` without `--all` prints a single row with `*` in the
-`JEST-PROJECT` and `JEST-TEST-FILE` columns. The `*` stands for every
-project and test file in view; add `--all` to list them one per row.
+`JEST-PROJECT`, `JEST-TEST-FILE` and `JEST-TEST` columns. The `*` stands for
+every project, test file and test in view; add `--all` to list them one per
+row.
 
 Use `dagger check` to run tests, in CI too: it fails when a test fails.
 
@@ -49,12 +53,14 @@ Use `dagger check` to run tests, in CI too: it fails when a test fails.
 | `--jest-project=PATH` | one project, by root relative to the workspace root (repeatable) |
 | `--jest-projects` | every project |
 | `--jest-test-file=PATH` | one test file, by path relative to its project (repeatable) |
-| `--jest-tests` | every test file |
+| `--jest-test-files` | every test file |
+| `--jest-test=NAME` | one test, by the name Jest calls it by (repeatable) |
+| `--jest-tests` | every test |
 
 `dagger check --help` lists the flags in effect. They can change when another
-installed module has a `JestProject` or `JestTestFile` type too.
+installed module has a `JestProject`, `JestTestFile` or `JestTest` type too.
 
-Each project is its own check. A failure names the project and the step
+Each test file is its own check. A failure names the project and the step
 that failed, with the end of its output:
 
 ```
@@ -135,10 +141,28 @@ So static discovery can be wrong about a config it cannot read:
 
 - It may list a helper that the config excludes. Selecting only that file
   runs nothing and passes.
-- It may miss a test that only the config's own logic finds. That test still
-  runs whenever the whole project runs, because that run uses Jest's config.
+- It may miss a test file that only the config's own logic finds. `dagger
+  check` runs the files it found, one per check, so that file does not run;
+  call the project's `test` function from a module to run Jest over the whole
+  project with its own config.
 - A project with no test file it can find reports no test files, so `dagger
   check` does not run it; call its `test` function from a module instead.
+
+## Tests
+
+A test file's tests are read from its source, with no container and no Jest.
+A test is keyed by the name Jest calls it by: the names of the `describe`
+blocks around it and its own, separated by spaces, so selecting it runs
+`--testNamePattern` over that exact name.
+
+Only names written as string literals are read. A name that is computed, one
+a `.each` row formats, and the tests inside a `describe` with such a name are
+left out, along with names holding characters outside ASCII:
+
+- They still run whenever their file runs as a whole, which is what `dagger
+  check` does unless a test is filtered out.
+- A file whose tests are all unnamed this way is keyed with `*`, standing for
+  every test in it; selecting `*` runs the file with no name filter.
 
 ## Dependencies
 
@@ -233,16 +257,21 @@ projects.get(key: "web").test(ws)               # run one whole project
 projects.get(key: "web").list(ws)               # jest --listTests output
 projects.get(key: "web").installRoot(ws)        # where dependencies are installed
 
-let files = projects.get(key: "web").tests(ws)
+let files = projects.get(key: "web").testFiles(ws)
 files.keys                                      # ["src/App.test.jsx", ...]
-run(files.subset(keys: ["src/App.test.jsx"]).batch.test(ws))
-run(files.get(key: "src/App.test.jsx").test(ws))
+files.subset(keys: ["src/App.test.jsx"]).batch.test(ws)
+files.get(key: "src/App.test.jsx").test(ws)     # run one whole file
+
+let tests = files.get(key: "src/App.test.jsx").tests(ws)
+tests.keys                                      # ["App renders the header", ...]
+run(tests.subset(keys: ["App renders the header"]).batch.test(ws))
+run(tests.get(key: "App renders the header").test(ws))
 ```
 
-`JestProjects.test` and `JestProject.test` are plain functions. They are not
-checks, so that `dagger check` does not run the same tests twice. The
-test-file `test` functions are checks. A check called through a dependency
-comes back unrun, so wrap it in a helper that runs it:
+The project and test-file `test` functions are plain functions. They are not
+checks, so that `dagger check` does not run the same tests twice; they raise
+on failure. The test `test` functions are checks. A check called through a
+dependency comes back unrun, so wrap it in a helper that runs it:
 
 ```dang
 let run(check: Check!): Void {
