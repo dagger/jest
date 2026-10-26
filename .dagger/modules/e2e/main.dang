@@ -31,12 +31,12 @@ type E2e {
   Run the jest toolchain against a real-world repository.
 
   This pulls the demo repo, exposes it as a Workspace, and runs the batch
-  check over its test files end-to-end.
+  over its test files end-to-end.
   """
   testDemoApp: Void @check {
     let ws = git(repo).head.tree.asWorkspace
 
-    run(jest.projects(ws).get(key: ".").tests(ws).batch.test(ws))
+    jest.projects(ws).get(key: ".").testFiles(ws).batch.test(ws)
   }
 
   """
@@ -233,7 +233,7 @@ type E2e {
 
     assertKeys(found.keys, [".", "sub"], "projects")
     assertKeys(
-      found.get(key: ".").tests(ws).keys,
+      found.get(key: ".").testFiles(ws).keys,
       [
         "__tests__/b.js",
         "__tests__/deep/c.tsx",
@@ -247,7 +247,7 @@ type E2e {
       "root test files",
     )
     assertKeys(
-      found.get(key: "sub").tests(ws).keys,
+      found.get(key: "sub").testFiles(ws).keys,
       ["__tests__/i.js", "h.spec.ts"],
       "nested test files",
     )
@@ -255,7 +255,7 @@ type E2e {
     # Keys do not depend on where the client stands.
     let inside = tree.asWorkspace(cwd: "sub")
     assertKeys(
-      jest.projects(inside).get(key: "sub").tests(inside).keys,
+      jest.projects(inside).get(key: "sub").testFiles(inside).keys,
       ["__tests__/i.js", "h.spec.ts"],
       "nested test files from sub",
     )
@@ -288,6 +288,27 @@ type E2e {
   let failed(check: Check!): Boolean! {
     {
       run(check)
+      false
+    } rescue true
+  }
+
+  """
+  Whether running the selected test files observed a failure. The test file
+  functions are plain functions, so they raise rather than return a Check.
+  """
+  let filesFailed(files: JestTestFiles!, ws: Workspace!): Boolean! {
+    {
+      files.batch.test(ws)
+      false
+    } rescue true
+  }
+
+  """
+  Whether running a whole test file observed a failure.
+  """
+  let fileFailed(file: JestTestFile!, ws: Workspace!): Boolean! {
+    {
+      file.test(ws)
       false
     } rescue true
   }
@@ -347,20 +368,20 @@ type E2e {
     let tree = project
       .withNewFile("src/broken.test.js", failingTest)
     let ws = tree.asWorkspace
-    let tests = jest.projects(ws).get(key: ".").tests(ws)
+    let files = jest.projects(ws).get(key: ".").testFiles(ws)
     let pass = "src/App.test.jsx"
     let fail = "src/broken.test.js"
 
-    assert(tests.keys.contains(pass), "missing " + pass + " in " + tests.keys.join(", "))
-    assert(tests.keys.contains(fail), "missing " + fail + " in " + tests.keys.join(", "))
-    assert(tests.get(key: pass).path == pass, "get did not return the file at its key")
+    assert(files.keys.contains(pass), "missing " + pass + " in " + files.keys.join(", "))
+    assert(files.keys.contains(fail), "missing " + fail + " in " + files.keys.join(", "))
+    assert(files.get(key: pass).path == pass, "get did not return the file at its key")
 
-    run(tests.subset(keys: [pass]).batch.test(ws))
-    run(tests.get(key: pass).test(ws))
-    assert(failed(tests.get(key: fail).test(ws)), "the failing file passed on its own")
-    assert(failed(tests.subset(keys: [pass, fail]).batch.test(ws)), "a subset with the failing file passed")
-    assert(failed(tests.batch.test(ws)), "the whole run missed the failing file")
-    run(tests.subset(keys: []).batch.test(ws))
+    files.subset(keys: [pass]).batch.test(ws)
+    files.get(key: pass).test(ws)
+    assert(fileFailed(files.get(key: fail), ws), "the failing file passed on its own")
+    assert(filesFailed(files.subset(keys: [pass, fail]), ws), "a subset with the failing file passed")
+    assert(filesFailed(files, ws), "the whole run missed the failing file")
+    files.subset(keys: []).batch.test(ws)
 
     # A failing test in a nested project under src: static discovery gives it
     # to the nested project, but Jest's own run of the root project finds it.
@@ -368,13 +389,54 @@ type E2e {
       .withNewFile("src/inner/jest.config.js", "module.exports = {}\n")
       .withNewFile("src/inner/broken.test.js", failingTest)
       .asWorkspace
-    let rootTests = jest.projects(hidden).get(key: ".").tests(hidden)
+    let rootFiles = jest.projects(hidden).get(key: ".").testFiles(hidden)
     assert(
-      rootTests.keys.contains("src/inner/broken.test.js") == false,
+      rootFiles.keys.contains("src/inner/broken.test.js") == false,
       "a nested project's test file was keyed under the root project",
     )
-    assert(failed(rootTests.batch.test(hidden)), "the whole run did not run the project natively")
-    run(rootTests.subset(keys: rootTests.keys.dropLast(1)).batch.test(hidden))
+    assert(filesFailed(rootFiles, hidden), "the whole run did not run the project natively")
+    rootFiles.subset(keys: rootFiles.keys.dropLast(1)).batch.test(hidden)
+
+    null
+  }
+
+  """
+  A test file's tests form a nested collection keyed by the name Jest calls
+  them by, describes included. Selecting one runs it alone; a name the source
+  does not hold is left out, so a file that has only those is keyed with "*",
+  and with nothing selected out the file runs with no name filter, which
+  reaches those tests too.
+  """
+  testRunCheck: Void @check {
+    let named = "src/named.test.js"
+    let computed = "src/computed.test.js"
+    let ws = project
+      .withNewFile(named, ```js
+        describe('group', () => {
+          test('passes', () => {})
+          test('fails', () => { expect(1).toBe(2) })
+        })
+        test.each([1, 2])('each %s', (n) => { expect(n).toBe(3) })
+      ``` + "\n")
+      .withNewFile(computed, ```js
+        const name = 'computed'
+        test(name, () => { expect(1).toBe(2) })
+      ``` + "\n")
+      .asWorkspace
+    let files = jest.projects(ws).get(key: ".").testFiles(ws)
+    let tests = files.get(key: named).tests(ws)
+
+    assertKeys(tests.keys, ["group passes", "group fails"], "test names")
+    assert(tests.get(key: "group fails").name == "group fails", "get did not return the test at its key")
+
+    run(tests.get(key: "group passes").test(ws))
+    run(tests.subset(keys: ["group passes"]).batch.test(ws))
+    assert(failed(tests.get(key: "group fails").test(ws)), "the failing test passed on its own")
+    assert(failed(tests.batch.test(ws)), "the whole file run missed the failing each row")
+
+    let only = files.get(key: computed).tests(ws)
+    assertKeys(only.keys, ["*"], "a file whose test names are computed")
+    assert(failed(only.get(key: "*").test(ws)), "* did not run the whole file")
 
     null
   }
@@ -394,35 +456,15 @@ type E2e {
       ``` + "\n")
       .asWorkspace
 
+    let planted(tool: Jest!): JestTestFile! {
+      tool.projects(ws).get(key: ".").testFiles(ws).get(key: file)
+    }
+
+    assert(fileFailed(planted(jest), ws), "the planted file passed without flags")
+    planted(jest(flags: ["--testNamePattern=^selected$"])).test(ws)
+    planted(jest(build: true, flags: ["--testNamePattern=^built$"])).test(ws)
     assert(
-      failed(jest.projects(ws).get(key: ".").tests(ws).get(key: file).test(ws)),
-      "the planted file passed without flags",
-    )
-    run(
-      jest(flags: ["--testNamePattern=^selected$"])
-        .projects(ws)
-        .get(key: ".")
-        .tests(ws)
-        .get(key: file)
-        .test(ws),
-    )
-    run(
-      jest(build: true, flags: ["--testNamePattern=^built$"])
-        .projects(ws)
-        .get(key: ".")
-        .tests(ws)
-        .get(key: file)
-        .test(ws),
-    )
-    assert(
-      failed(
-        jest(flags: ["--testNamePattern=^built$"])
-          .projects(ws)
-          .get(key: ".")
-          .tests(ws)
-          .get(key: file)
-          .test(ws),
-      ),
+      fileFailed(planted(jest(flags: ["--testNamePattern=^built$"])), ws),
       "the build output existed without build",
     )
 
@@ -641,24 +683,24 @@ type E2e {
     let ws = tree.asWorkspace
     let found = jest.projects(ws)
     assertKeys(found.keys, ["."], "projects")
-    let files = found.get(key: ".").tests(ws)
+    let files = found.get(key: ".").testFiles(ws)
     assertKeys(
       files.keys,
       ["packages/a/__tests__/base/one.js", "packages/b/two.test.js"],
       "monorepo test files",
     )
-    run(files.batch.test(ws))
-    run(files.subset(keys: ["packages/b/two.test.js"]).batch.test(ws))
+    files.batch.test(ws)
+    files.subset(keys: ["packages/b/two.test.js"]).batch.test(ws)
 
     let inA = tree.asWorkspace(cwd: "packages/a/__tests__")
     let own = jest.projects(inA)
     assertKeys(own.keys, ["packages/a"], "projects from inside packages/a")
     assertKeys(
-      own.get(key: "packages/a").tests(inA).keys,
+      own.get(key: "packages/a").testFiles(inA).keys,
       ["__tests__/base/one.js"],
       "packages/a test files",
     )
-    run(own.get(key: "packages/a").tests(inA).batch.test(inA))
+    own.get(key: "packages/a").testFiles(inA).batch.test(inA)
     null
   }
 
