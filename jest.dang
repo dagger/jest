@@ -308,7 +308,7 @@ let isConfigName(name: String!): Boolean! {
   name.containsMatch(`^jest\.config(?:[.-][^/]*)?\.(?:[mc]?[jt]s|json)$`)
 }
 
-# The key standing for every test a file declares, named or not.
+# The key standing for a file's tests whose names its source does not hold.
 let anyTest: String! = "*"
 
 # A call to a Jest suite or test function, with its modifier chain: describe,
@@ -316,52 +316,168 @@ let anyTest: String! = "*"
 # paren is part of the match, so calls and bare parens form one token stream.
 let testCall = `(?:[fx]?describe|[fx]?it|test)(?:\.(?:only|skip|failing|concurrent|todo|each))*\s*\(`
 
-# The tests a file declares, named as Jest names them: the literal names of the
-# enclosing describes and of the test itself, separated by spaces, in source
-# order. A name that is not a string literal, one a `.each` row formats, and the
-# tests under a describe with such a name are left out, since Jest's name for
-# them is not in the source. A file that declares none is keyed with anyTest.
+# A tagged-template .each, whose rows name the tests it declares.
+let taggedEach = `\b(?:[fx]?describe|[fx]?it|test)(?:\.(?:only|skip|failing|concurrent))*\.each\s*` + "`"
+
+# The tokens the scope scanner reads, in the masked source: member calls
+# (which declare nothing), suite and test calls, arrow and function bodies,
+# loop and condition heads and bodies, conditional operators, and bare
+# brackets and line ends.
+let scopeToken = `\.\s*` + testCall + `|\b` + testCall + `|=>\s*\{|=>|\bfunction\b|\b(?:for|while)\s*\(|\bdo\s*\{|\b(?:if|switch|catch)\s*\(|\b(?:try|finally|catch)\s*\{|\belse\b|&&|\|\||\?\?|\?\.|\?|[(){};\n]`
+
+# A scanner frame: a paren group (describe, test, call, loophead, condhead),
+# a brace group (fn, fnd -- a describe callback --, loop, cond, block), or an
+# expression -- an arrow body (arrow, arrowd) or the operand of a conditional
+# operator (ternary) -- which ends with the group around it, a semicolon, or
+# the end of a line it has started on. at is where it opened.
+let topKind(stack: [{{kind: String!, name: String!, at: Int!}}!]!): String! {
+  stack.takeLast(1).map { f => f.kind }[0] ?? ""
+}
+
+let expressionKinds: [String!]! = ["arrow", "arrowd", "ternary"]
+
+let popArrows(stack: [{{kind: String!, name: String!, at: Int!}}!]!): [{{kind: String!, name: String!, at: Int!}}!]! {
+  if (expressionKinds.contains(topKind(stack))) { popArrows(stack.dropLast(1)) } else { stack }
+}
+
+# The tests a file declares that its source names, as Jest names them: the
+# literal names of the enclosing describes and of the test itself, separated
+# by spaces, in source order. A test is named only when every scope around it
+# is the file's top level, a describe callback or a plain block: one declared
+# in any other function -- a shared helper, a callback, a method -- gets its
+# name from where it is called, and one under a condition or in a loop -- if,
+# else, switch, try, catch, a ternary, && or || -- may run any number of
+# times, or not at all. A name that is not a string literal, one a `.each` row
+# formats, and the tests under a describe without a literal name are not
+# named either. When a file declares any test it cannot name, or none it can,
+# anyTest stands for those.
 let testNames(text: String!): [String!]! {
   let source = prepare(text)
   let masked = mask(source)
   # Names are read from the source, where the literals survive, and paired by
-  # offset with the calls found in the masked source, where parens inside
+  # offset with the calls found in the masked source, where brackets inside
   # strings and comments are gone and the nesting is sound.
-  let literals = source.matchAll(Regexp(`\b` + testCall + `\s*(` + stringLiteral + `)`)).map { m =>
+  # The literal must be the whole first argument: 'a ' + b is not a name.
+  let literals = source.matchAll(Regexp(`\b` + testCall + `\s*(` + stringLiteral + `)\s*[,)]`)).map { m =>
     let value = stringValue(m.captures[0] ?? "") ?? ""
     # prepare() flattens non-ASCII characters, so a name the source does not
     # hold verbatim was mangled: --testNamePattern would never match it.
     let kept = if (value.contains("?") and text.contains(value) == false) { "" } else { value }
     {{start: m.start, name: kept}}
   }
-  let frames: [{{depth: Int!, name: String!}}]! = []
+  let frames: [{{kind: String!, name: String!, at: Int!}}!]! = []
   let empty: [String!]! = []
-  let state = masked
-    # A member call such as regexp.test(s) declares nothing, but its paren
-    # still counts.
-    .matchAll(Regexp(`\.\s*` + testCall + `|\b` + testCall + `|[()]`))
-    .reduce({{depth: 0, stack: frames, out: empty}}) { st, m =>
-      if (m.string == ")") {
-        let depth = st.depth - 1
-        {{depth: depth, stack: st.stack.filter { f => f.depth < depth }, out: st.out}}
-      } else if (m.string == "(" or m.string.hasPrefix(".")) {
-        {{depth: st.depth + 1, stack: st.stack, out: st.out}}
+  let parens = ["describe", "test", "call", "loophead", "condhead"]
+  let braces = ["fn", "fnd", "loop", "cond", "block"]
+  # Scopes whose tests are not named.
+  let unnamedScopes = ["fn", "arrow", "loop", "cond", "ternary"]
+  # pending is the kind of brace a head promised, set at pendingAt; closed is
+  # where the last call's paren group closed, for method bodies.
+  let initial = {{stack: frames, pending: "", pendingAt: 0, closed: -1, out: empty, unnamed: false}}
+  let state = masked.matchAll(Regexp(scopeToken)).reduce(initial) { st, m =>
+    let tok = m.string
+    let top = topKind(st.stack)
+    let push(kind: String!): [{{kind: String!, name: String!, at: Int!}}!]! {
+      st.stack + [{{kind: kind, name: "", at: m.end}}]
+    }
+    if (tok == "\n") {
+      # An expression ends with the line it started on, and so does a
+      # braceless condition or loop body.
+      let at = st.stack.takeLast(1).map { f => f.at }[0] ?? 0
+      let started = expressionKinds.contains(top) and slice(masked, at, m.start).trimSpace != ""
+      let stack = if (started) { popArrows(st.stack) } else { st.stack }
+      let body = (st.pending == "cond" or st.pending == "loop") and slice(masked, st.pendingAt, m.start).trimSpace != ""
+      let pending = if (body) { "" } else { st.pending }
+      {{stack: stack, pending: pending, pendingAt: st.pendingAt, closed: st.closed, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == ")") {
+      let open = popArrows(st.stack)
+      let kind = topKind(open)
+      if (parens.contains(kind)) {
+        # A head's closing paren leaves its body to come.
+        let pending = if (kind == "loophead") { "loop" } else if (kind == "condhead") { "cond" } else { st.pending }
+        let pendingAt = if (kind == "loophead" or kind == "condhead") { m.end } else { st.pendingAt }
+        let closed = if (kind == "call") { m.end } else { -1 }
+        {{stack: open.dropLast(1), pending: pending, pendingAt: pendingAt, closed: closed, out: st.out, unnamed: st.unnamed}}
       } else {
-        let name = if (m.string.contains(".each")) { "" } else {
-          literals.filter { l => l.start == m.start }.map { l => l.name }[0] ?? ""
-        }
-        let prefix = st.stack.map { f => f.name }
-        if (m.string.containsMatch(`^[fx]?describe`)) {
-          {{depth: st.depth + 1, stack: st.stack + [{{depth: st.depth, name}}], out: st.out}}
-        } else if (name == "" or prefix.contains("")) {
-          {{depth: st.depth + 1, stack: st.stack, out: st.out}}
-        } else {
-          {{depth: st.depth + 1, stack: st.stack, out: st.out + [(prefix + [name]).join(" ")]}}
-        }
+        {{stack: open, pending: st.pending, pendingAt: st.pendingAt, closed: -1, out: st.out, unnamed: st.unnamed}}
+      }
+    } else if (tok == "}") {
+      let open = popArrows(st.stack)
+      let rest = if (braces.contains(topKind(open))) { open.dropLast(1) } else { open }
+      {{stack: rest, pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == ";") {
+      {{stack: popArrows(st.stack), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == "{") {
+      # A brace right after a call's parens, with no head before it, is a
+      # method body: name(args) { ... }.
+      let method = st.closed >= 0 and slice(masked, st.closed, m.start).trimSpace == ""
+      let kind = if (st.pending != "") { st.pending } else if (method) { "fn" } else { "block" }
+      {{stack: push(kind), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == "(") {
+      # Parameter lists keep a pending function body.
+      {{stack: push("call"), pending: st.pending, pendingAt: st.pendingAt, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok.hasPrefix("=>")) {
+      let callback = top == "describe"
+      let kind = if (tok.hasSuffix("{")) {
+        if (callback) { "fnd" } else { "fn" }
+      } else {
+        if (callback) { "arrowd" } else { "arrow" }
+      }
+      {{stack: push(kind), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == "function") {
+      let pending = if (top == "describe") { "fnd" } else { "fn" }
+      {{stack: st.stack, pending: pending, pendingAt: m.end, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == "else") {
+      {{stack: st.stack, pending: "cond", pendingAt: m.end, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok.containsMatch(`^do\b`)) {
+      {{stack: push("loop"), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok.containsMatch(`^(?:try|finally|catch)\s*\{`)) {
+      {{stack: push("cond"), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok.containsMatch(`^(?:for|while)\b`)) {
+      {{stack: push("loophead"), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok.containsMatch(`^(?:if|switch|catch)\b`)) {
+      {{stack: push("condhead"), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok == "?.") {
+      # Optional chaining, not a condition.
+      st
+    } else if (tok == "&&" or tok == "||" or tok == "??" or tok == "?") {
+      {{stack: push("ternary"), pending: st.pending, pendingAt: st.pendingAt, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else if (tok.hasPrefix(".")) {
+      # A member call such as regexp.test(s) declares nothing.
+      {{stack: push("call"), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+    } else {
+      let literal = if (tok.contains(".each")) { "" } else {
+        literals.filter { l => l.start == m.start }.map { l => l.name }[0] ?? ""
+      }
+      # A braceless condition or loop body counts as one.
+      let scoped = st.stack.any { f => unnamedScopes.contains(f.kind) } or st.pending == "cond" or st.pending == "loop"
+      let prefix = st.stack.filter { f => f.kind == "describe" }.map { f => f.name }
+      let named = literal != "" and scoped == false and prefix.contains("") == false
+      if (tok.containsMatch(`^[fx]?describe`)) {
+        let frame = {{kind: "describe", name: if (named) { literal } else { "" }, at: m.end}}
+        {{stack: st.stack + [frame], pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: st.unnamed}}
+      } else if (named) {
+        {{
+          stack: push("test"),
+          pending: "",
+          pendingAt: 0,
+          closed: -1,
+          out: st.out + [(prefix + [literal]).join(" ")],
+          unnamed: st.unnamed
+        }}
+      } else {
+        {{stack: push("test"), pending: "", pendingAt: 0, closed: -1, out: st.out, unnamed: true}}
       }
     }
+  }
   let found = state.out.uniq
-  if (found.length == 0) { [anyTest] } else { found }
+  if (found.length == 0) {
+    [anyTest]
+  } else if (state.unnamed or source.containsMatch(Regexp(taggedEach))) {
+    found + [anyTest]
+  } else {
+    found
+  }
 }
 
 """
@@ -458,7 +574,7 @@ type Jest {
       .map { file =>
         {{
           dir: parentOf(file),
-          projects: configRules(ws.file("/" + file).contents, containerPath(parentOf(file))).projects
+          projects: configRules(readConfig(ws, "/" + file), containerPath(parentOf(file))).projects
         }}
       }
       .filter { parent => parent.projects.length > 0 }
@@ -469,6 +585,19 @@ type Jest {
           and coveredBy(parent.projects, root)
       } == false
     }
+  }
+
+  """
+  A config file's text, for discovery to read statically. A file it cannot
+  read reads as empty, which takes Jest's defaults: listing never fails on a
+  config, and Jest reports it when the project runs, failing only that
+  project's checks.
+  """
+  let readConfig(ws: Workspace!, file: String!): String! {
+    let text = { ws.file(file).contents } rescue {
+      err: Error => ""
+    }
+    text
   }
 
   """
@@ -507,13 +636,35 @@ type Jest {
   }
 
   """
-  Strings in byte order. Keys feed cache keys and batch arguments, so their
-  order must not depend on how the filesystem was walked.
+  Strings in byte order. Keys feed cache keys and the shared test command, so
+  their order must not depend on how the filesystem was walked. A merge sort,
+  so discovering a large project stays n log n.
   """
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    if (items.length < 2) {
+      items
+    } else {
+      let half = items.length / 2
+      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
+    }
+  }
+
+  """
+  Two byte-ordered lists merged into one.
+  """
+  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
+    let i = 0
+    let j = 0
+    (a + b).map { unused =>
+      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+        let item = a[i]!
+        i += 1
+        item
+      } else {
+        let item = b[j]!
+        j += 1
+        item
+      }
     }
   }
 
@@ -677,6 +828,11 @@ type Jest {
   }
 
   """
+  The pinned image the report indexer runs in, the same for every project.
+  """
+  let indexerImage: String! = "node:25.2.1-alpine3.22"
+
+  """
   Where the Dagger Jest library is mounted.
   """
   let libraryPath: String! = "/opt/dagger-jest"
@@ -762,7 +918,17 @@ type JestProject {
   Test files in this project, keyed by project-relative path.
   """
   testFiles(ws: Workspace!): JestTestFiles! {
-    JestTestFiles(files: testFilePaths(ws), project: self)
+    let files = testFilePaths(ws)
+    JestTestFiles(
+      files: files,
+      project: self,
+      # Each file's tests are stored with it, so the engine filters them along
+      # with the files when it passes this collection to a test check.
+      entries: files.map { file =>
+        let names = testNames(fileContents(ws, file))
+        JestTestFileEntry(path: file, names: names, tests: JestTests(names: names, path: file, project: self))
+      },
+    )
   }
 
   """
@@ -788,9 +954,7 @@ type JestProject {
     let ownName = configs.filter { file => tool.configNames.contains(file) }[0]
     let own = configRules(
       if (ownName == null) { "" } else {
-        ws.file(
-          tool.absolutePath(prefix + (ownName ?? "")),
-        ).contents
+        tool.readConfig(ws, tool.absolutePath(prefix + (ownName ?? "")))
       },
       base,
     )
@@ -805,7 +969,7 @@ type JestProject {
       {{
         dir,
         rules: covered.filter { file => dirOf(file) == dir }.map { file =>
-          configRules(ws.file(tool.absolutePath(prefix + file)).contents, base + "/" + dir)
+          configRules(tool.readConfig(ws, tool.absolutePath(prefix + file)), base + "/" + dir)
         }
       }}
     }
@@ -926,7 +1090,6 @@ type JestProject {
         "build failed (" + packageManager(ws) + " run build, exit " + toString(buildCode) + ")" + output(built)
       } else {
         let ran = withLibrary(ws, built)
-          .withEnvVariable("DAGGER_JEST_CACHE_BUSTER", UUID.v7)
           # A test that uses a Dagger SDK opens a session from inside this
           # container, and a session finds its workspace root by walking up to a
           # .git directory. Without one it gets an empty workspace, so every
@@ -958,6 +1121,183 @@ type JestProject {
         }
       }
     }
+  }
+
+  """
+  The runner after the package's build script, when build is set and it has
+  one. The build may have failed: setupFailure says.
+  """
+  let builtRunner(ws: Workspace!): Container! {
+    let ctr = runner(ws)
+    if (tool.build and hasBuildScript(ws)) {
+      ctr.withExec([packageManager(ws), "run", "build"], expect: ReturnType.ANY)
+    } else {
+      ctr
+    }
+  }
+
+  """
+  Why this project cannot run Jest -- the install or the build failed -- or
+  null. Every test check of the project fails with it.
+  """
+  let setupFailure(ws: Workspace!): String {
+    let failure = installFailure(ws)
+    if (failure != null) {
+      return failure
+    }
+    if (tool.build and hasBuildScript(ws)) {
+      let ctr = builtRunner(ws)
+      let code = ctr.exitCode
+      if (code != 0) {
+        return "build failed (" + packageManager(ws) + " run build, exit " + toString(code) + ")" + output(ctr)
+      }
+    }
+    null
+  }
+
+  """
+  The built runner, ready for the shared run.
+  """
+  let testContainer(ws: Workspace!): Container! {
+    withLibrary(ws, builtRunner(ws))
+      # A test that uses a Dagger SDK opens a session from inside this
+      # container, and a session finds its workspace root by walking up to a
+      # .git directory. Without one it gets an empty workspace, so every
+      # workspace-relative API fails there -- including the serveModule a
+      # generated module client calls before its first query. The marker only
+      # has to exist, so synthesize an empty one rather than uploading the
+      # real git directory; a workspace built from a Directory has none to
+      # upload anyway.
+      .withDirectory("/src/.git", directory)
+      # With its own session rather than the one running Jest, a module
+      # address resolves against the user's workspace instead of against
+      # this module. The engine mounts a version-matched CLI on PATH for it,
+      # which a TypeScript client on SDK v1.0.4 or later finds by itself;
+      # an older one only reads _EXPERIMENTAL_DAGGER_CLI_BIN, so keep
+      # setting it until those are out of support.
+      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
+  }
+
+  """
+  Where the shared run leaves its report and output, in its container.
+  """
+  let reportDir: String! = "/tmp/dagger-jest"
+
+  """
+  One Jest run shared by every selected test check in this project, and a
+  bounded result for each of them.
+
+  Each check receives the same engine-filtered collection and calls this, so
+  every check builds the same command, which the engine runs once. Only after
+  it does a check pick out its own result.
+
+  With nothing filtered out of the project, Jest runs the project as its own
+  config sees it. Otherwise it runs the selected files by path, in key order,
+  which discovery sorts, and, when tests were filtered out of them, one
+  anchored --testNamePattern over the sorted selected names. A selected "*"
+  adds an alternative matching every name no selected file's source holds.
+  """
+  let runTests(ws: Workspace!, files: JestTestFiles!): JestTestResults! {
+    # Entries are in key order and the selected keys are a subsequence of it.
+    let next = 0
+    let kept = files.entries.filter { entry =>
+      if (next < files.files.length and entry.path == files.files[next]!) {
+        next = next + 1
+        true
+      } else {
+        false
+      }
+    }
+    let selections = kept
+      .filter { entry => entry.tests.names.length > 0 }
+      .map { entry => JestFileSelection(path: entry.path, names: entry.tests.names, discovered: entry.names) }
+    if (selections.length == 0) {
+      raise "no Jest tests selected in project " + path
+    }
+    let failure = setupFailure(ws)
+    if (failure != null) {
+      return JestTestResults(results: directory, selections: selections, project: path, failure: failure)
+    }
+    let empty: [String!]! = []
+    let narrowedNames = kept.any { entry => entry.tests.narrowed }
+    let report = reportDir + "/report.json"
+    let common = ["--json", "--outputFile=" + report, "--passWithNoTests"]
+    let args = if (files.narrowed == false and narrowedNames == false) {
+      common
+    } else {
+      let filter = if (selections.any { s => s.narrowed }) {
+        # Every check of the project evaluates this, so the names are only
+        # gathered and sorted for the narrowed run that needs them.
+        let named = tool.sorted(
+          selections.reduce(empty) { all, s => all + s.names.filter { n => n != anyTest } }.uniq,
+        )
+        let alternatives = named.map { name => Regexp.escape(name) }
+        let rest = if (selections.any { s => s.names.contains(anyTest) }) {
+          let known = tool.sorted(
+            selections.reduce(empty) { all, s => all + s.discovered.filter { n => n != anyTest } }.uniq,
+          )
+          if (known.length == 0) {
+            [".*"]
+          } else {
+            ["(?!(?:" + known.map { name => Regexp.escape(name) }.join("|") + ")$).*"]
+          }
+        } else {
+          empty
+        }
+        ["--testNamePattern", "^(?:" + (alternatives + rest).join("|") + ")$"]
+      } else {
+        empty
+      }
+      common + filter + ["--runTestsByPath"] + selections.map { s => s.path }
+    }
+    let ran = testContainer(ws)
+      # Created up front and writable by any user, so the report has
+      # somewhere to go whoever the image runs as, and is empty when Jest
+      # wrote none.
+      # 438 is 0666.
+      .withNewFile(report, "", permissions: 438)
+      .withExec(
+        jest(ws, tool.flags + args),
+        daggerInDaggerNewSession: true,
+        expect: ReturnType.ANY,
+        redirectStdout: reportDir + "/stdout.log",
+        redirectStderr: reportDir + "/stderr.log",
+      )
+    # The indexer runs in a pinned container of its own, the same for every
+    # project, so neither the project's image nor the NODE_OPTIONS hook is in
+    # its way.
+    let indexed = container
+      .from(tool.indexerImage)
+      .withDirectory("/report", ran.directory(reportDir))
+      .withFile("/usr/local/lib/jest-report.cjs", currentModule.source.file("helpers/jest-report.cjs"))
+      .withNewFile(
+        "/report/selection.json",
+        JSON.encode(selections.map { s =>
+          {{
+            path: tool.containerPath(tool.join(path, s.path)),
+            key: s.path,
+            names: s.names,
+            discovered: s.discovered
+          }}
+        }),
+      )
+      .withExec([
+        "node",
+        "/usr/local/lib/jest-report.cjs",
+        "--report",
+        "/report/report.json",
+        "--stdout",
+        "/report/stdout.log",
+        "--stderr",
+        "/report/stderr.log",
+        "--selection",
+        "/report/selection.json",
+        "--exit-code",
+        toString(ran.exitCode),
+        "--output",
+        "/results",
+      ])
+    JestTestResults(results: indexed.directory("/results"), selections: selections, project: path, failure: null)
   }
 
   """
@@ -1314,7 +1654,19 @@ type JestTestFiles @collection {
   """
   Test files selected in or out since the collection was discovered.
   """
-  delta: CollectionDelta
+  delta: CollectionDelta @delta
+
+  """
+  Whether the active selection removed test files from this collection.
+  Without a delta, a direct call, the explicit list is the safe choice.
+  """
+  let narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
+  """
+  Every test file's tests, stored with it. The engine filters these along with
+  the files when it passes this collection to a test check.
+  """
+  entries: [JestTestFileEntry!]!
 
   let project: JestProject!
 
@@ -1322,28 +1674,44 @@ type JestTestFiles @collection {
   The test file at this path.
   """
   file(path: String!): JestTestFile! @get {
-    JestTestFile(path: path, project: project)
+    JestTestFile(path: path, project: project, tests: entries.filter { entry => entry.path == path }[0]!.tests)
   }
 
   """
-  Run the selected test files in this project.
+  Run the selected test files in this project, raising on failure. A plain
+  function, not a check: `dagger check` runs each test's own check instead.
   """
   test(ws: Workspace!): Void {
     # With nothing selected out, run the project as a whole with its own
-    # config rather than listing every file. Without a delta, the explicit
-    # list is the safe choice.
-    let whole = if (delta == null) {
-      false
-    } else {
-      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
-    }
-    if (whole) {
+    # config rather than listing every file.
+    if (narrowed == false) {
       project.test(ws)
     } else if (files.length > 0) {
       project.runFiles(ws, files, [])
     }
     null
   }
+}
+
+"""
+A test file and the test keys discovery found in it.
+"""
+type JestTestFileEntry {
+  """
+  Test file path, relative to the project root.
+  """
+  path: String!
+
+  """
+  Every test key discovery found in the file. A list, not a collection, so
+  it is not filtered: it tells a deselected named test from an unnamed one.
+  """
+  names: [String!]!
+
+  """
+  The file's tests, as a collection the engine filters.
+  """
+  tests: JestTests!
 }
 
 """
@@ -1358,29 +1726,16 @@ type JestTestFile {
   let project: JestProject!
 
   """
-  Tests this file declares, keyed by the name Jest calls them by.
+  Tests this file declares, keyed by the name Jest calls them by. "*" stands
+  for the tests whose names the source does not hold.
   """
-  tests(ws: Workspace!): JestTests! {
-    JestTests(names: testNames(project.fileContents(ws, path)), file: self)
-  }
+  tests: JestTests!
 
   """
-  Run every test in this file.
+  Run every test in this file. A plain function, not a check.
   """
   test(ws: Workspace!): Void {
     project.runFiles(ws, [path], [])
-  }
-
-  """
-  Run the named tests in this file. "*" stands for every test it declares,
-  including the ones whose name is not in its source.
-  """
-  let runTests(ws: Workspace!, names: [String!]!): Void {
-    if (names.contains(anyTest)) {
-      test(ws)
-    } else {
-      project.runFiles(ws, [path], names)
-    }
   }
 }
 
@@ -1389,40 +1744,47 @@ The tests a Jest test file declares, keyed by name.
 """
 type JestTests @collection {
   """
-  Test names, as Jest joins them: the enclosing describes and the test.
+  Test names, as Jest joins them: the enclosing describes and the test. "*"
+  stands for the file's tests whose names its source does not hold.
   """
   names: [String!]! @keys
 
   """
   Tests selected in or out since the collection was discovered.
   """
-  delta: CollectionDelta
+  delta: CollectionDelta @delta
 
-  let file: JestTestFile!
+  """
+  Whether the active selection removed tests from this collection. Without a
+  delta, a direct call, the explicit list is the safe choice.
+  """
+  let narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
+  """
+  The test file, relative to the project root.
+  """
+  let path: String!
+
+  let project: JestProject!
 
   """
   The test with this name.
   """
   named(name: String!): JestTest! @get {
-    JestTest(name: name, file: file)
+    JestTest(name: name, path: path, project: project)
   }
 
   """
-  Run the selected tests.
+  Run the selected tests in this file, raising on failure. A plain function,
+  not a check: `dagger check` runs each test's own check instead.
   """
-  test(ws: Workspace!): Void @check {
-    # With nothing selected out, run the file with no name filter, so the
-    # tests whose name the source does not hold run too. Without a delta, the
-    # explicit list is the safe choice.
-    let whole = if (delta == null) {
-      false
-    } else {
-      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
-    }
-    if (whole) {
-      file.test(ws)
+  test(ws: Workspace!): Void {
+    # With nothing selected out, or "*" selected, run the file with no name
+    # filter, so the tests whose name the source does not hold run too.
+    if (narrowed == false or names.contains(anyTest)) {
+      project.runFiles(ws, [path], [])
     } else if (names.length > 0) {
-      file.runTests(ws, names)
+      project.runFiles(ws, [path], names)
     }
     null
   }
@@ -1433,16 +1795,93 @@ A single Jest test.
 """
 type JestTest {
   """
-  The name Jest calls this test by.
+  The name Jest calls this test by, or "*" for the file's tests whose names
+  its source does not hold.
   """
   name: String!
 
-  let file: JestTestFile!
+  """
+  The test file, relative to the project root.
+  """
+  let path: String!
+
+  let project: JestProject!
 
   """
   Run this test.
+
+  Every selected test of a project shares one Jest run. This check fails for
+  its own test's result, or for a failure it cannot be told apart from.
   """
-  test(ws: Workspace!): Void @check {
-    file.runTests(ws, [name])
+  test(ws: Workspace!, selection: JestTestFiles!): Void @check {
+    project.runTests(ws, selection).assertPassed(path, name)
+  }
+}
+
+"""
+The selected tests of one test file, as the shared run sees them.
+"""
+type JestFileSelection {
+  """
+  Test file path, relative to the project root.
+  """
+  let path: String!
+
+  """
+  Selected test keys, in key order.
+  """
+  let names: [String!]!
+
+  """
+  Every test key discovery found in the file.
+  """
+  let discovered: [String!]!
+
+  """
+  Whether the selection removed any of the file's tests.
+  """
+  let narrowed: Boolean! { names.length != discovered.length }
+}
+
+"""
+A shared Jest run's results, one bounded file per selected test.
+"""
+type JestTestResults {
+  let results: Directory!
+
+  let selections: [JestFileSelection!]!
+
+  """
+  The project root, for messages.
+  """
+  let project: String!
+
+  """
+  Why the project could not run Jest at all, or null.
+  """
+  let failure: String
+
+  """
+  Fail unless the selected test at file and name passed. Results are indexed
+  by position in the selection, so names never become file paths.
+  """
+  let assertPassed(file: String!, name: String!): Void {
+    if (failure != null) {
+      raise "Jest project " + project + ": " + failure!
+    }
+    let fileIndex = selections.takeWhile { s => s.path != file }.length
+    if (fileIndex == selections.length) {
+      raise "Jest test file is outside the selection: " + file
+    }
+    let names = selections[fileIndex]!.names
+    let testIndex = names.takeWhile { n => n != name }.length
+    if (testIndex == names.length) {
+      raise "Jest test is outside the selection: " + file + ": " + name
+    }
+    let result = results.file(toString(fileIndex) + "/" + toString(testIndex)).contents
+    if (result != "") {
+      raise "Jest project " + project + ", " + file + ": " + result
+    }
+    null
   }
 }

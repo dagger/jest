@@ -30,13 +30,13 @@ type E2e {
   """
   Run the jest toolchain against a real-world repository.
 
-  This pulls the demo repo, exposes it as a Workspace, and runs the batch
-  over its test files end-to-end.
+  This pulls the demo repo, exposes it as a Workspace, and runs its test
+  files end-to-end.
   """
   testDemoApp: Void @check {
     let ws = git(repo).head.tree.asWorkspace
 
-    jest.projects(ws).get(key: ".").testFiles(ws).batch.test(ws)
+    jest.projects(ws).get(key: ".").testFiles(ws).test(ws)
   }
 
   """
@@ -192,7 +192,7 @@ type E2e {
 
     let none = found.subset(keys: [])
     assert(none.keys.length == 0, "empty subset kept keys: " + none.keys.join(", "))
-    none.batch.test(ws)
+    none.test(ws)
 
     null
   }
@@ -276,7 +276,7 @@ type E2e {
   let projectsFailed(tree: Directory!, cwd: String!): Boolean! {
     let ws = tree.asWorkspace(cwd: cwd)
     let observed = {
-      jest.projects(ws).batch.test(ws)
+      jest.projects(ws).test(ws)
       false
     } rescue true
     observed
@@ -298,7 +298,7 @@ type E2e {
   """
   let filesFailed(files: JestTestFiles!, ws: Workspace!): Boolean! {
     {
-      files.batch.test(ws)
+      files.test(ws)
       false
     } rescue true
   }
@@ -314,7 +314,7 @@ type E2e {
   }
 
   """
-  The projects batch runs every project below the cwd, and entering one of
+  Running the projects runs every project below the cwd, and entering one of
   them leaves its siblings out of reach.
   """
   descendantScopeCheck: Void @check {
@@ -376,12 +376,12 @@ type E2e {
     assert(files.keys.contains(fail), "missing " + fail + " in " + files.keys.join(", "))
     assert(files.get(key: pass).path == pass, "get did not return the file at its key")
 
-    files.subset(keys: [pass]).batch.test(ws)
+    files.subset(keys: [pass]).test(ws)
     files.get(key: pass).test(ws)
     assert(fileFailed(files.get(key: fail), ws), "the failing file passed on its own")
     assert(filesFailed(files.subset(keys: [pass, fail]), ws), "a subset with the failing file passed")
     assert(filesFailed(files, ws), "the whole run missed the failing file")
-    files.subset(keys: []).batch.test(ws)
+    files.subset(keys: []).test(ws)
 
     # A failing test in a nested project under src: static discovery gives it
     # to the nested project, but Jest's own run of the root project finds it.
@@ -395,17 +395,17 @@ type E2e {
       "a nested project's test file was keyed under the root project",
     )
     assert(filesFailed(rootFiles, hidden), "the whole run did not run the project natively")
-    rootFiles.subset(keys: rootFiles.keys.dropLast(1)).batch.test(hidden)
+    rootFiles.subset(keys: rootFiles.keys.dropLast(1)).test(hidden)
 
     null
   }
 
   """
   A test file's tests form a nested collection keyed by the name Jest calls
-  them by, describes included. Selecting one runs it alone; a name the source
-  does not hold is left out, so a file that has only those is keyed with "*",
-  and with nothing selected out the file runs with no name filter, which
-  reaches those tests too.
+  them by, describes included. Selecting one runs it alone. A test the source
+  does not name -- a .each row, a computed name -- is keyed "*" with the
+  others like it, and a file that has only those is keyed with "*" alone. A
+  test's check fails for its own failure; a failing unnamed test fails "*".
   """
   testRunCheck: Void @check {
     let named = "src/named.test.js"
@@ -424,20 +424,87 @@ type E2e {
       ``` + "\n")
       .asWorkspace
     let files = jest.projects(ws).get(key: ".").testFiles(ws)
-    let tests = files.get(key: named).tests(ws)
+    let tests = files.get(key: named).tests
 
-    assertKeys(tests.keys, ["group passes", "group fails"], "test names")
+    assertKeys(tests.keys, ["group passes", "group fails", "*"], "test names")
     assert(tests.get(key: "group fails").name == "group fails", "get did not return the test at its key")
 
-    run(tests.get(key: "group passes").test(ws))
-    run(tests.subset(keys: ["group passes"]).batch.test(ws))
-    assert(failed(tests.get(key: "group fails").test(ws)), "the failing test passed on its own")
-    assert(failed(tests.batch.test(ws)), "the whole file run missed the failing each row")
+    # The collection's test function is a plain function: it raises.
+    tests.subset(keys: ["group passes"]).test(ws)
+    assert(testsFailed(tests.subset(keys: ["group fails"]), ws), "the failing test passed on its own")
+    assert(testsFailed(tests, ws), "the whole file run missed the failing each row")
 
-    let only = files.get(key: computed).tests(ws)
+    # Each test's check shares one run over the selection it is given.
+    run(tests.get(key: "group passes").test(ws, selection: files))
+    assert(failed(tests.get(key: "group fails").test(ws, selection: files)), "the failing test's check passed")
+    assert(failed(tests.get(key: "*").test(ws, selection: files)), "the failing each row did not fail *")
+
+    let only = files.get(key: computed).tests
     assertKeys(only.keys, ["*"], "a file whose test names are computed")
-    assert(failed(only.get(key: "*").test(ws)), "* did not run the whole file")
+    assert(failed(only.get(key: "*").test(ws, selection: files)), "* did not run the whole file")
 
+    null
+  }
+
+  """
+  Whether running the selected tests of a file observed a failure.
+  """
+  let testsFailed(tests: JestTests!, ws: Workspace!): Boolean! {
+    {
+      tests.test(ws)
+      false
+    } rescue true
+  }
+
+  """
+  Test names are read statically, as Jest joins them, and only where the
+  source fixes them: a test declared inside a helper, a loop, a callback or a
+  method gets its name from where it runs, and one under a condition -- if,
+  else, try, catch, switch, a ternary, && -- may not run, so each is keyed
+  "*", as are tests under a describe whose name is not a literal. A plain
+  block is transparent.
+  """
+  testNameDiscoveryCheck: Void @check {
+    let file = "src/names.test.js"
+    let ws = project
+      .withNewFile(file, ```js
+        describe('outer', () => {
+          describe('inner', function () {
+            it('deep', () => {})
+          })
+          test('shallow', async () => {})
+          const shared = () => { test('from helper', () => {}) }
+          shared()
+          for (const n of [1, 2]) {
+            test('looped', () => {})
+          }
+          [1].forEach((n) => test('callback', () => {}))
+          beforeEach(() => {})
+        })
+        function suite(name) {
+          describe(name, () => { test('in suite', () => {}) })
+        }
+        suite('a')
+        const n = 1
+        describe('concatenated ' + n, () => { test('under concatenation', () => {}) })
+        test('also ' + n, () => {})
+        test(`plain template`, () => {})
+        if (process.env.NEVER_SET) { test('in if', () => {}) } else { test('in else', () => {}) }
+        if (process.env.NEVER_SET) test('braceless', () => {})
+        try { test('in try', () => {}) } catch (e) { test('in catch', () => {}) }
+        switch (process.env.NEVER_SET) { case 'a': test('in switch', () => {}) }
+        process.env.NEVER_SET ? test('in ternary', () => {}) : null
+        process.env.NEVER_SET && test('in and', () => {})
+        class Suite { register() { test('in method', () => {}) } }
+        { test('in block', () => {}) }
+        test('last', () => {})
+      ``` + "\n")
+      .asWorkspace
+    assertKeys(
+      jest.projects(ws).get(key: ".").testFiles(ws).get(key: file).tests.keys,
+      ["outer inner deep", "outer shallow", "plain template", "in block", "last", "*"],
+      "static test names",
+    )
     null
   }
 
@@ -471,6 +538,376 @@ type E2e {
     null
   }
 
+  # Only the unindented CHECKS header counts: nested TESTS summaries count the
+  # tests Jest reports, not the checks Dagger attributes them to. Without a
+  # terminal the report drops the "==" around its headers.
+  let checkSummaryMatches(output: String!, passed: Int!, failed: Int!): Boolean! {
+    let headers = output.split("\n").filter { line =>
+      line.hasPrefix("CHECKS ") or line.hasPrefix("== CHECKS ==")
+    }
+    let expected = (if (failed > 0) { ["✘", toString(failed), "failed"] } else { [] })
+      + (if (passed > 0) { ["✔", toString(passed), "passed"] } else { [] })
+    headers.length == 1 and headers[0]!.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
+      .trimSpace.split(" ").filter { word => word != "" } == expected
+  }
+
+  selectedSummaryCheck: Void @check {
+    let wrong = "CHECKS  ✘ 8 failed\n  TESTS\n    ✘ 1 failed\n    ✔ 7 passed\n"
+    assert(checkSummaryMatches(wrong, 7, 1) == false, "nested test counts hid failed checks")
+    assert(checkSummaryMatches(wrong, 0, 8), "zero passing checks were not recognized")
+    assert(checkSummaryMatches("CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count")
+    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1), "mixed counts were not recognized")
+    assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header")
+    null
+  }
+
+  """
+  Run the engine-provided CLI on a fixture workspace with the toolchain
+  installed as jest, plus any extra dagger.toml text. Selection goes through
+  the CLI because direct Dang calls do not apply the engine's filtered
+  collection view.
+  """
+  let selectedRun(ws: Workspace!, fixture: Directory!, args: [String!]!, config: String! = ""): Container! {
+    container
+      .from("alpine:3.23")
+      # The CLI searches its local workspace with the client's grep, and
+      # busybox grep lacks the flags it passes.
+      .withExec(["apk", "add", "--no-cache", "grep"])
+      .withEnvVariable("NO_COLOR", "1")
+      .withDirectory("/source", ws.directory("/", exclude: ["**/node_modules", "dist"]))
+      .withDirectory("/work", fixture)
+      .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile("/work/dagger.toml", "[modules.jest]\nsource = \"/source\"\n" + config)
+      .withWorkdir("/work")
+      .withExec(
+        ["/dev/.dagger/dagger", "--progress=report"] + args,
+        expect: ReturnType.ANY,
+        daggerInDaggerNewSession: true,
+      )
+  }
+
+  """
+  Run `dagger check` on a fixture and assert the check totals and messages.
+  """
+  let selectedCheck(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    passed: Int!,
+    failed: Int! = 0,
+    messages: [String!]! = [],
+  ): Void {
+    let result = selectedRun(ws, fixture, ["check", "--generated=false"] + args)
+    let output = result.stdout + result.stderr
+    assert((result.exitCode == 0) == (failed == 0), "unexpected check exit status:\n" + output)
+    assert(checkSummaryMatches(output, passed, failed), "unexpected Dagger check totals:\n" + output)
+    messages.map { message =>
+      assert(output.contains(message), "missing " + message + ":\n" + output)
+    }
+    null
+  }
+
+  """
+  Run selected checks and count the Jest runs the report shows: it nests a
+  run's tests under the check that started it, one TESTS block per run.
+  """
+  let selectedRuns(ws: Workspace!, fixture: Directory!, args: [String!]!, passed: Int!, tests: String!): Int! {
+    let result = selectedRun(ws, fixture, ["check", "--generated=false"] + args)
+    let output = result.stdout + result.stderr
+    assert(result.exitCode == 0, "the selected checks failed:\n" + output)
+    assert(checkSummaryMatches(output, passed, 0), "unexpected Dagger check totals:\n" + output)
+    let lines = output.split("\n").map { line => line.trimSpace }
+    let runs = lines.filter { line => line == "TESTS" or line == "== TESTS ==" }.length
+    let shared = lines.filter { line => line == tests }.length
+    assert(runs == shared, "a run did not show " + tests + ":\n" + output)
+    runs
+  }
+
+  """
+  Three tests in each of two files in each of two projects, sharing one
+  install. A test named other records that it ran, and each project's global
+  teardown fails the run when it did, so a run that should have left it out
+  fails every check of its project.
+  """
+  let selectionFixture: Directory! {
+    let tests = "test('foo', () => {})\ntest('bar', () => {})\ntest('other', () => { require('fs').writeFileSync('/tmp/other-ran', '') })\n"
+    let teardown = "module.exports = async () => {\n  if (require('fs').existsSync('/tmp/other-ran')) throw new Error('excluded test ran')\n}\n"
+    ["p1", "p2"].reduce(
+      directory.withNewFile(
+        "package.json",
+        "{\"name\": \"selection\", \"private\": true, \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+      ),
+    ) { dir, project =>
+      dir
+        .withNewFile(project + "/jest.config.js", "module.exports = { globalTeardown: '<rootDir>/teardown.js' }\n")
+        .withNewFile(project + "/teardown.js", teardown)
+        .withNewFile(project + "/a.test.js", tests)
+        .withNewFile(project + "/b.test.js", tests)
+    }
+  }
+
+  let selectionArgs: [String!]! = ["--jest-test=foo", "--jest-test=bar"]
+
+  """
+  Selecting tests by name across two projects and two files each runs exactly
+  those, one check per test, and leaves the unselected test out.
+  """
+  selectedTestsCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs, passed: 8)
+  }
+
+  """
+  With several tests selected, each project runs Jest once: every check of a
+  project builds the same command.
+  """
+  selectedSharedRunCheck(ws: Workspace!): Void @check {
+    let runs = selectedRuns(ws, selectionFixture, selectionArgs, passed: 8, tests: "✔ 4 passed")
+    assert(runs == 2, "expected one Jest run per project, saw " + toString(runs))
+    null
+  }
+
+  """
+  A single selected test runs alone, in one Jest run.
+  """
+  selectedSingleTestCheck(ws: Workspace!): Void @check {
+    let args = ["--jest-project=p1", "--jest-test-file=a.test.js", "--jest-test=foo"]
+    let runs = selectedRuns(ws, selectionFixture, args, passed: 1, tests: "✔ 1 passed")
+    assert(runs == 1, "expected one Jest run, saw " + toString(runs))
+    null
+  }
+
+  """
+  A failing test fails its own check only.
+  """
+  selectedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile(
+      "p1/a.test.js",
+      "test('foo', () => { throw new Error('selected failure') })\ntest('bar', () => {})\n",
+    )
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 7,
+      failed: 1,
+      messages: ["jest-project=p1&jest-test-file=a.test.js&jest-test=foo", "selected failure"],
+    )
+  }
+
+  """
+  A test file that fails to run fails the selected checks in it, and no other.
+  """
+  selectedFileFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile(
+      "p2/b.test.js",
+      "test('foo', () => {})\ntest('bar', () => {})\nthis is not javascript\n",
+    )
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["Jest project p2, b.test.js: the test file failed outside its tests"],
+    )
+  }
+
+  """
+  A project whose config fails to load fails its own checks, naming the
+  config; the other project's run is separate and passes.
+  """
+  selectedSetupFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("p2/jest.config.js", "throw new Error('config-error-marker')\n")
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 4,
+      failed: 4,
+      messages: ["jest failed (exit 1) without a report", "config-error-marker", "/src/p2/jest.config.js"],
+    )
+  }
+
+  """
+  A project whose config discovery cannot make sense of -- here, one that
+  does not parse -- is still listed with Jest's defaults rather than failing
+  the listing, and fails alone when it runs, naming the file; the other
+  project is unaffected.
+  """
+  selectedDiscoveryFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("p2/jest.config.js", "module.exports = { testMatch: [\n")
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 4,
+      failed: 4,
+      messages: ["jest-project=p2", "/src/p2/jest.config.js"],
+    )
+  }
+
+  """
+  A project of one passing test file, for the reporting checks below.
+  """
+  let reportingFixture: Directory! {
+    directory
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"reporting\", \"private\": true, \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+      )
+      .withNewFile("r/jest.config.js", "module.exports = {}\n")
+      .withNewFile("r/ok.test.js", "test('ok', () => {})\n")
+  }
+
+  """
+  A failing .each row has no name in the source, so it fails the file's "*"
+  check and no other.
+  """
+  selectedEachFailureCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture.withNewFile(
+      "r/each.test.js",
+      "test('named', () => {})\ntest.each([1])('row %s', () => { throw new Error('each failure') })\n",
+    )
+    selectedCheck(
+      ws,
+      fixture,
+      ["--jest-project=r"],
+      passed: 2,
+      failed: 1,
+      # The report shows the failing check and the test's diagnostics, but
+      # hides the check's own error when it has failing test spans.
+      messages: ["jest-test-file=each.test.js&jest-test=*", "each failure"],
+    )
+  }
+
+  """
+  A failing test the source declares nowhere it can see -- here, one a file it
+  requires declares -- has no check of its own and no "*" to land on, so it
+  fails every selected test of its file.
+  """
+  selectedUnnamedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture
+      .withNewFile("r/shared.js", "module.exports = () => test('from shared', () => { throw new Error('shared failure') })\n")
+      .withNewFile("r/uses.test.js", "test('named', () => {})\nrequire('./shared')()\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--jest-project=r"],
+      passed: 1,
+      failed: 1,
+      messages: ["jest-test-file=uses.test.js&jest-test=named", "shared failure"],
+    )
+  }
+
+  """
+  Tests declared in a helper get their names where the helper runs, so they
+  are "*", not mis-keyed tests that never run; nested describes name their
+  tests the way Jest does.
+  """
+  selectedNamesCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture.withNewFile(
+      "r/names.test.js",
+      "const shared = () => test('shared', () => {})\ndescribe('a', shared)\ndescribe('b', shared)\ndescribe('outer', () => {\n  describe('inner', () => {\n    test('deep', () => {})\n  })\n})\n",
+    )
+    selectedCheck(ws, fixture, ["--jest-project=r", "--jest-test-file=names.test.js"], passed: 2)
+    selectedCheck(ws, fixture, ["--jest-project=r", "--jest-test=outer inner deep"], passed: 1)
+    # "*" alone runs the tests no selected file names, and nothing else.
+    selectedCheck(ws, fixture, ["--jest-project=r", "--jest-test=*"], passed: 1)
+  }
+
+  """
+  A failing test file Jest's config finds but discovery does not -- here,
+  through a testMatch that is not all literals -- has no check of its own, so
+  it fails every check of its project's run.
+  """
+  selectedUncheckedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture
+      .withNewFile(
+        "r/jest.config.js",
+        "const extra = '**/*.check.js'\nmodule.exports = { testMatch: ['**/*.test.js', extra] }\n",
+      )
+      .withNewFile("r/broken.check.js", "test('broken', () => { throw new Error('unchecked failure') })\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--jest-project=r"],
+      passed: 0,
+      failed: 1,
+      messages: ["jest-test-file=ok.test.js&jest-test=ok", "unchecked failure"],
+    )
+  }
+
+  """
+  A selected test Jest never runs fails, saying so, rather than passing:
+  here, in a file discovery lists but Jest's config ignores, through a
+  testPathIgnorePatterns that is not a literal.
+  """
+  selectedNeverRanCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture
+      .withNewFile(
+        "r/jest.config.js",
+        "const ignore = ['/node_modules/', '/ghost/']\nmodule.exports = { testPathIgnorePatterns: ignore }\n",
+      )
+      .withNewFile("r/ghost/x.test.js", "test('ghost', () => {})\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--jest-project=r"],
+      passed: 1,
+      failed: 1,
+      messages: ["did not run: jest ran no tests from ghost/x.test.js"],
+    )
+  }
+
+  """
+  A test under a condition is "*", so it passes whether or not the condition
+  holds, rather than failing as not run.
+  """
+  selectedConditionalCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture.withNewFile(
+      "r/cond.test.js",
+      "test('always', () => {})\nif (process.env.NEVER_SET) {\n  test('sometimes', () => {})\n}\n",
+    )
+    selectedCheck(ws, fixture, ["--jest-project=r"], passed: 3)
+  }
+
+  """
+  Jest scopes .only to its file and skips the file's other tests, and skip,
+  x-prefixed and todo tests are pending: all of them appear in the report,
+  so their checks pass rather than fail as not run. The unfocused test would
+  fail if it ran.
+  """
+  selectedOnlyCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture.withNewFile(
+      "r/only.test.js",
+      "test.only('focused', () => {})\ntest('unfocused', () => { throw new Error('ran despite only') })\ntest.skip('skipped', () => {})\nxit('crossed', () => {})\ntest.todo('later')\n",
+    )
+    selectedCheck(ws, fixture, ["--jest-project=r"], passed: 6)
+  }
+
+  """
+  Listing runs no tool: with a base image that does not exist, an install
+  that fails and a config that throws, `dagger check -l` still lists every
+  test, while running the checks fails.
+  """
+  listingRunsNothingCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withNewFile(
+        "package.json",
+        "{\"name\": \"broken\", \"private\": true, \"scripts\": {\"postinstall\": \"exit 3\"}, \"devDependencies\": {\"jest\": \"30.2.0\"}}\n",
+      )
+      .withNewFile("p2/jest.config.js", "throw new Error('config-error-marker')\n")
+    let config = "[modules.jest.settings]\nbaseImageAddress = \"registry.invalid/no-such-image:0\"\n"
+    let listed = selectedRun(ws, fixture, ["check", "-l", "--all"], config: config)
+    let output = listed.stdout + listed.stderr
+    assert(listed.exitCode == 0, "listing failed:\n" + output)
+    let rows = output.split("\n").filter { line => line.contains("test.js") }
+    assert(rows.length == 12, "expected twelve tests listed:\n" + output)
+    let ran = selectedRun(ws, fixture, ["check", "--generated=false"] + selectionArgs, config: config)
+    assert(ran.exitCode != 0, "the broken base image was never used:\n" + ran.stdout + ran.stderr)
+    null
+  }
+
   """
   A project with Jest installed, for the checks below that run Jest on
   synthetic projects. They share one package.json, so they share one install.
@@ -491,7 +928,7 @@ type E2e {
   let outcome(tree: Directory!, tool: Jest!): String! {
     let ws = tree.asWorkspace
     let result = {
-      tool.projects(ws).batch.test(ws)
+      tool.projects(ws).test(ws)
       "passed"
     } rescue {
       err: Error => err.message
@@ -689,8 +1126,8 @@ type E2e {
       ["packages/a/__tests__/base/one.js", "packages/b/two.test.js"],
       "monorepo test files",
     )
-    files.batch.test(ws)
-    files.subset(keys: ["packages/b/two.test.js"]).batch.test(ws)
+    files.test(ws)
+    files.subset(keys: ["packages/b/two.test.js"]).test(ws)
 
     let inA = tree.asWorkspace(cwd: "packages/a/__tests__")
     let own = jest.projects(inA)
@@ -700,7 +1137,7 @@ type E2e {
       ["__tests__/base/one.js"],
       "packages/a test files",
     )
-    own.get(key: "packages/a").testFiles(inA).batch.test(inA)
+    own.get(key: "packages/a").testFiles(inA).test(inA)
     null
   }
 
