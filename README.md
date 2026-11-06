@@ -1,11 +1,12 @@
 # Jest Dagger Toolchain
 
-Runs your [Jest](https://jestjs.io) tests in Dagger, one check per test file,
-with every test exported to OpenTelemetry as a span.
+Runs your [Jest](https://jestjs.io) tests in Dagger, one check per test, with
+one Jest run per project, and every test exported to OpenTelemetry as a span.
 
 ## Requirements
 
-Requires Dagger v1.0.0-beta.15 or later.
+Requires Dagger v1.0.0-beta.22 or later, the first release that passes a
+check its selected collection.
 
 ## Installation
 
@@ -28,19 +29,15 @@ dagger list jest-test-files -a --jest-project=web
 dagger list jest-tests -a --jest-test-file=src/App.test.jsx
 ```
 
-The toolchain has one check, `test`, at `jest/projects/test-files/tests/test`.
-It runs once per selected test file, over that file's selected tests:
-
-- With every test of the file selected, it runs `jest --passWithNoTests
-  --runTestsByPath <file>`, so Jest's own configuration decides which of its
-  tests run.
-- With some filtered out, it adds `--testNamePattern '^(?:<names>)$'`, so only
-  the selected ones run.
+The toolchain has one check, `test`, at `jest/projects/test-files/tests/test`:
+one per selected test. Every selected test of a project shares one Jest run
+(see [How tests run](#how-tests-run)).
 
 `dagger check -l` without `--all` prints a single row with `*` in the
 `JEST-PROJECT`, `JEST-TEST-FILE` and `JEST-TEST` columns. The `*` stands for
 every project, test file and test in view; add `--all` to list them one per
-row.
+row. (A `*` in the `JEST-TEST` column of a listed row is the
+[unnamed-tests key](#tests).) Listing runs no container: no install, no Jest.
 
 Use `dagger check` to run tests, in CI too: it fails when a test fails.
 
@@ -54,23 +51,69 @@ Use `dagger check` to run tests, in CI too: it fails when a test fails.
 | `--jest-projects` | every project |
 | `--jest-test-file=PATH` | one test file, by path relative to its project (repeatable) |
 | `--jest-test-files` | every test file |
-| `--jest-test=NAME` | one test, by the name Jest calls it by (repeatable) |
+| `--jest-test=NAME` | one test, by the name Jest calls it by, or `*` (repeatable) |
 | `--jest-tests` | every test |
 
 `dagger check --help` lists the flags in effect. They can change when another
 installed module has a `JestProject`, `JestTestFile` or `JestTest` type too.
 
-Each test file is its own check. A failure names the project and the step
-that failed, with the end of its output:
+Each test is its own check. A failure names the project, and the test file
+or the step that failed, with the end of its output:
 
 ```
 Jest project a: install failed (npm install, exit 1):
 npm error ...
-Jest project b: jest failed (exit 1):
-FAIL src/sum.test.js
-...
-Jest project c: jest is not installed: add it to the devDependencies of c/package.json (...)
+Jest project b, src/sum.test.js: adds failed:
+● adds
+expect(received).toBe(expected) ...
+Jest project c: jest failed (exit 127) without a report:
+jest is not installed: add it to the devDependencies of c/package.json (...)
 ```
+
+### How tests run
+
+All test checks of a project call the same helper with the same
+engine-filtered selection, so they build one byte-identical command, which
+the engine runs once. Projects run separately, each with its own install and
+container.
+
+- With nothing filtered out of the project, Jest runs the project as its own
+  config sees it: `jest --json --outputFile=... --passWithNoTests`.
+- Otherwise it runs the selected files by path, in sorted key order,
+  `--runTestsByPath <files>`, leaving out files with no selected test. When
+  tests were filtered out of them, it adds one anchored `--testNamePattern`
+  over the sorted union of the selected names. A selected `*` adds an
+  alternative matching every name that no selected file's source holds,
+  `(?!(?:<names>)$).*`.
+
+The pattern applies to every file of the run, so a name selected in one file
+also runs a test of that name in another, and a selected `*` also runs the
+unnamed tests of the other files.
+
+The run writes Jest's JSON report to a file and never fails by itself. A small
+indexer, in a pinned Node image shared by every project, reads the report once
+and writes one bounded result per selected test, keeping the last 32 KiB of
+each diagnostic; each check reads only its own. A check then fails when:
+
+- its own test failed; for `*`, any test of its file the source does not
+  name;
+- its file failed outside its tests: it failed to run, or a hook threw;
+- a test in its file with no selected check of its own failed -- an unnamed
+  test when `*` is not selected, or a named test the pattern could not leave
+  out: it cannot be told apart from the file's selected tests;
+- its test did not run although its file did: discovery read a test Jest does
+  not declare, so the check says so rather than passing. `*` with no tests
+  passes, since an empty `.each` table is legitimate;
+- or the project's run failed for all of them: the install or build failed,
+  the config failed to load, Jest wrote no report (`--bail`, a failing global
+  setup or teardown), a test file without a check failed (only the whole
+  project run reaches those), Jest did not run a listed file, or Jest exited
+  non-zero with no failure in its report.
+
+A selected test that is skipped or `todo` passes. Logs and test spans belong
+to the check that started the shared run; the other checks share its result.
+The run is cached like any other Dagger operation, so rerunning with the same
+inputs reuses its results.
 
 ## Projects
 
@@ -139,14 +182,18 @@ config file:
 
 So static discovery can be wrong about a config it cannot read:
 
-- It may list a helper that the config excludes. Selecting only that file
-  runs nothing and passes.
-- It may miss a test file that only the config's own logic finds. `dagger
-  check` runs the files it found, one per check, so that file does not run;
-  call the project's `test` function from a module to run Jest over the whole
-  project with its own config.
+- It may list a helper that the config excludes. Its check fails, saying
+  Jest did not run the file.
+- It may miss a test file that only the config's own logic finds. That file
+  has no check. It runs when nothing is filtered out of its project, since
+  Jest then runs the project with its own config, and if it fails, every check
+  of the project fails, naming it. A narrowed run leaves it out.
 - A project with no test file it can find reports no test files, so `dagger
   check` does not run it; call its `test` function from a module instead.
+- A config file discovery cannot read or make sense of takes Jest's defaults,
+  so listing never fails on it. If Jest cannot load it either, the project's
+  checks fail when it runs, naming the file, and other projects are
+  unaffected.
 
 ## Tests
 
@@ -155,14 +202,32 @@ A test is keyed by the name Jest calls it by: the names of the `describe`
 blocks around it and its own, separated by spaces, so selecting it runs
 `--testNamePattern` over that exact name.
 
-Only names written as string literals are read. A name that is computed, one
-a `.each` row formats, and the tests inside a `describe` with such a name are
-left out, along with names holding characters outside ASCII:
+A test is named only where the source fixes its name:
 
-- They still run whenever their file runs as a whole, which is what `dagger
-  check` does unless a test is filtered out.
-- A file whose tests are all unnamed this way is keyed with `*`, standing for
-  every test in it; selecting `*` runs the file with no name filter.
+- its name, and every enclosing `describe`'s, is a string literal that is the
+  whole first argument (`'a'`, not `'a ' + b`, and not a template with
+  `${}`);
+- every scope around it is the file's top level, a `describe` callback or a
+  plain `{}` block. A test declared in any other function -- a shared helper,
+  a `forEach` callback, a class or object method -- gets its name from where
+  it runs, and one in a loop or under a condition -- `if`/`else`, `try`/
+  `catch`/`finally`, `switch`, a ternary, `&&`, `||` -- may run many times or
+  not at all;
+- it is not a `.each` row.
+
+Names with characters outside ASCII are left out too.
+
+The tests the source does not name share one key, `*`, which a file has
+whenever it declares any such test, or none Jest's syntax shows (a file whose
+tests come from a helper it imports). Selecting `*` runs exactly those, with a
+pattern that excludes the named ones, and its check fails when any of them
+does. A file whose tests are all named has no `*`; a file whose tests are all
+unnamed has only `*`.
+
+A test counts as run when Jest's report lists it with any status. A test
+skipped because another in its file has `.only`, and `.skip`, `x`-prefixed and
+`.todo` tests, are listed as pending, so their checks pass. A named test Jest
+does not list at all, though it ran the file, fails its check as not run.
 
 ## Dependencies
 
@@ -245,33 +310,42 @@ Unless `useEnv` is set, the toolchain preloads its register hook through
 
 ## Using it from another module
 
-`projects(ws)` returns a collection. Build its members with `get(key:)`, narrow
-it with `subset(keys:)`, and reach the functions that span the collection
-through `batch`:
+`projects(ws)` returns a collection. Build its members with `get(key:)` and
+narrow it with `subset(keys:)`. Collection functions are called on the
+collection itself; there is no `batch` namespace:
 
 ```dang
 let projects = jest.projects(ws)
 projects.keys                                   # ["api", "web"]
-projects.batch.test(ws)                         # run every project, list the failures
+projects.test(ws)                               # run every project, list the failures
 projects.get(key: "web").test(ws)               # run one whole project
 projects.get(key: "web").list(ws)               # jest --listTests output
 projects.get(key: "web").installRoot(ws)        # where dependencies are installed
 
 let files = projects.get(key: "web").testFiles(ws)
 files.keys                                      # ["src/App.test.jsx", ...]
-files.subset(keys: ["src/App.test.jsx"]).batch.test(ws)
+files.subset(keys: ["src/App.test.jsx"]).test(ws)
 files.get(key: "src/App.test.jsx").test(ws)     # run one whole file
 
-let tests = files.get(key: "src/App.test.jsx").tests(ws)
+let tests = files.get(key: "src/App.test.jsx").tests
 tests.keys                                      # ["App renders the header", ...]
-run(tests.subset(keys: ["App renders the header"]).batch.test(ws))
-run(tests.get(key: "App renders the header").test(ws))
+tests.subset(keys: ["App renders the header"]).test(ws)
+run(tests.get(key: "App renders the header").test(ws, selection: files))
 ```
 
-The project and test-file `test` functions are plain functions. They are not
-checks, so that `dagger check` does not run the same tests twice; they raise
-on failure. The test `test` functions are checks. A check called through a
-dependency comes back unrun, so wrap it in a helper that runs it:
+`tests` is now a field rather than `tests(ws)`, so that the engine can filter
+it along with the files.
+
+The project, test-file and tests `test` functions are plain functions, each
+running Jest on its own. They are not checks, so that `dagger check` does not
+run the same tests twice; they raise on failure.
+
+The test `test` function is the check. Its `selection` is the project's test
+files: `dagger check` passes the collection it has filtered, and every check
+it passes it to shares one run over the selection. Called directly, pass the
+collection you want run; a direct `subset` does not filter the tests inside
+each file, so it runs their files whole. A check called through a dependency
+comes back unrun, so wrap it in a helper that runs it:
 
 ```dang
 let run(check: Check!): Void {
@@ -292,7 +366,23 @@ Dagger shell can:
 dagger -c 'jest | projects | get web | list'
 ```
 
-The end-to-end tests in `.dagger/modules/e2e` exercise all of this.
+The end-to-end tests in `.dagger/modules/e2e` exercise all of this. Direct
+Dang calls do not apply the engine's filtered view of a selection, so the
+`selected-*` checks run the engine-provided CLI on fixture workspaces in an
+isolated session, and assert check totals and messages: several projects and
+files, unselected tests left out, one Jest run per project, a single test
+run alone, a failing test, a file that fails to run, a config that fails to
+load or to parse, a failing `.each` row landing on `*`, an unnamed failure
+landing on its file's tests, helper-defined tests and nested describes,
+conditional tests, `.only` and pending tests, a failure outside any selected
+test, and a selected test that never ran.
+`listing-runs-nothing-check` lists a workspace whose base image does not
+exist and whose install fails, proving listing runs no container.
+
+```sh
+dagger check 'e2e/*'            # the whole suite
+dagger check 'e2e/selected-*'   # the selection checks
+```
 
 ## Jest OpenTelemetry auto instrumentation
 
