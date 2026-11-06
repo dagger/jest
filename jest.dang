@@ -334,7 +334,7 @@ let testNames(text: String!): [String!]! {
     let kept = if (value.contains("?") and text.contains(value) == false) { "" } else { value }
     {{start: m.start, name: kept}}
   }
-  let frames: [{{depth: Int!, name: String!}}]! = []
+  let frames: [{{depth: Int!, name: String!}}!]! = []
   let empty: [String!]! = []
   let state = masked
     # A member call such as regexp.test(s) declares nothing, but its paren
